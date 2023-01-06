@@ -1,0 +1,214 @@
+<!-- vim: sw=2 ts=2 expandtab smartindent ft=javascript
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Hello, world!</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="" />
+  <style>
+  document, body {
+    margin: 0px;
+    padding: 0px;
+    overflow: hidden;
+  }
+  </style>
+</head>
+<body>
+	<canvas id="game"></canvas>
+<script>
+
+/* maybe we will want to make the game tick less often on the server
+ * to save CPU cycles, or maybe we need to tick the game faster
+ * to resolve a timing bug.
+ *
+ * by configuring times like 2*SECOND_IN_TICKS, not only does the
+ * developer get to think in terms of a unit they're already
+ * familiar with -- seconds -- they also get the ability to
+ * change how many times per second their game logic runs,
+ * simply by changing this variable. */
+const SECOND_IN_TICKS = 60; 
+
+/* we've all been there.
+ *
+ * you're trying to get the speed of the boss's attack
+ * juuust right, but it takes you 10 minutes of minion smashing
+ * to get to the boss chamber.
+ *
+ * you're going to need to tweak the parameters a hundred
+ * times, at least, and that means that your'e going to have to
+ * spend 1,000 minutes -- 16 hours -- just grinding minions.
+ *
+ * And that's just for this single boss?
+ *
+ * Fuck that.
+ *
+ * Wouldn't it be incredible if you could hide behind a pillar
+ * as the boss prepares for its next onslaught, change some code,
+ * and see it immediately take effect?
+ *
+ * With this "state hack" I'll show you in the following lines,
+ * you can do just that.
+ *
+ * The way it works is by taking all of the information the game
+ * needs -- all of its "state" and storing it in a single object.
+ * This single object is then cached in localStorage, which persists
+ * across reloads. If your code changes, it's still the same.
+ *
+ * Every frame, the game takes this information out of local storage,
+ * updates it accordingly, and then puts it back.
+ * If you change the code that's being run in your web browser,
+ * the state is still there waiting for you from last frame.
+ *
+ * If you tweak that value and reload just as the boss is taking
+ * a swing at you, suddenly his hammer slows down to just the right
+ * amount and you're able to dodge around it and deliver the killing
+ * blow. */
+const defaultState = () => ({
+  tick: 0,
+  sprinklers: [
+    { x: 0.5, y: 0.5 }
+  ],
+  particles: []
+});
+const getState = () => {
+  /* fetch state from local storage */
+  let state = JSON.parse(window.localStorage.getItem("state"));
+
+  /* nothing in the storage: this is the first run */
+  if (state == null) state = defaultState();
+
+  return state;
+}
+const setState = state =>
+  window.localStorage.setItem("state", JSON.stringify(state));
+
+
+window.onkeydown = e => {
+  /* this is a handy shortcut for developers.
+   *
+   * being able to preserve your application state across
+   * runs is really powerful, but sometimes you DO actually
+   * want to start from 0.
+   *
+   * that's what this is for. just press Escape and everything
+   * gets cleared.  */
+  if (e.key == "Escape")
+    setState(defaultState());
+}
+window.onmousedown = ({ pageX: x, pageY: y }) => {
+  /* we want to support zoom,
+   * meaning that a bigger window shows more detail,
+   * rather than showing you more of the game world.
+   *
+   * this means that instead of using pixels as a unit,
+   * everything is expressed in "screen widths"
+   *
+   * therefore, we have to translate the mouse's position
+   * in pixels to a position expressed in screen widths. */
+  x /= window.innerWidth;
+  y /= window.innerWidth;
+
+  /* this should be straight forward. */
+  const state = getState();
+  state.sprinklers.push({ x, y });
+  setState(state);
+};
+window.onload = function frame(elapsed) {
+  requestAnimationFrame(frame);
+
+  const state = getState();
+  update(state);
+  setState(state);
+
+  /* now, we render what's in state */
+  render(getState());
+  /* (don't need to call setState, render only reads) */
+}
+
+function update(state) {
+
+  /* doing timing via ticks rather than setTimeouts allows for
+   * more hot-swappability (how do you serialize a setTimeout?) */
+  state.tick++;
+
+  for (const sprink of state.sprinklers) {
+    /* every second, sprinklers spawn particles */
+    if ((state.tick % SECOND_IN_TICKS/10) == 0) {
+      state.particles.push({
+        x: sprink.x,
+        y: sprink.y,
+        death_tick: state.tick + SECOND_IN_TICKS*10,
+
+        /* turn the current tick into an angle,
+         * and from an angle into a velocity vector. */
+        vx: Math.cos(state.tick + sprink.x*10),
+        vy: Math.sin(state.tick + sprink.y*10),
+      });
+    }
+  }
+
+  state.particles = state.particles.filter(part => {
+    /* should be straight forward */
+    part.x += part.vx * 0.003;
+    part.y += part.vy * 0.003;
+
+    /* wrap around the edges pacman style */
+    if (part.x < 0) part.x = 1 - Math.abs(part.x);
+    if (part.x > 1) part.x = part.x - 1;
+    if (part.y < 0) part.y = 1 - Math.abs(part.y);
+    if (part.y > 1) part.y = part.y - 1;
+
+    return part.death_tick >= state.tick;
+  });
+
+}
+
+function render(state) {
+  /* initialize canvas */
+  const canvas = document.getElementById("game");
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const ctx = canvas.getContext("2d");
+
+  /* clear canvas */
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save(); {
+    /* make the window wider, it'll zoom.
+     * make the window longer, it'll just show more.
+     *
+     * also, instead of pixels the units are now "screen widths" */
+    ctx.scale(canvas.width, canvas.width);
+
+    /* fill in background */
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 1, 1);
+
+    for (const { x, y } of state.sprinklers) {
+      const size = 0.05;
+      ctx.fillStyle = "blue";
+      ctx.fillRect(x - size/2, y - size/2, size, size);
+    }
+    for (const { x, y, death_tick } of state.particles) {
+      const size = 0.01;
+
+      /* canvas treats alphas > 1 the same as 1 */
+      const ttl = death_tick - state.tick;
+      ctx.globalAlpha = ttl / SECOND_IN_TICKS;
+
+      ctx.fillStyle = "purple";
+      ctx.fillRect(x - size/2, y - size/2, size, size);
+
+      /* bad things happen if you forget to reset this */
+      ctx.globalAlpha = 1.0;
+    }
+
+  }; ctx.restore();
+};
+
+</script>
+</body>
+</html>
