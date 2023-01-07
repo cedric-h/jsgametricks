@@ -296,6 +296,8 @@ function client(canvas, state) {
   render(canvas, state.world);
 }
 
+const spritesheet = new Image();
+spritesheet.src = "art.png";
 function render(canvas, world) {
   /* initialize canvas */
   const ctx = canvas.getContext("2d");
@@ -312,23 +314,67 @@ function render(canvas, world) {
     ctx.scale(canvas.width, canvas.width);
 
     /* fill in background */
-    ctx.fillStyle = "black";
+    ctx.fillStyle = "snow";
     ctx.fillRect(0, 0, 1, 1);
+
+    const TILE_PLAYER = { w: 1, h: 1, x: 0, y: 8 };
+    const TILE_SPEAR  = { w: 1, h: 1, x: 4, y: 9 };
+
+    const draw_tile = (tile, dx, dy, dsize, angle) => {
+      const TILE_SIZE = spritesheet.height/11;
+
+      if (angle != undefined) {
+        ctx.save();
+        ctx.translate(dx, dy);
+        ctx.rotate(angle);
+        ctx.drawImage(
+          spritesheet,
+
+          /* source x & y */
+          tile.x*TILE_SIZE, tile.y*TILE_SIZE,
+          /* source width and height */
+          tile.w*TILE_SIZE, tile.h*TILE_SIZE,
+
+          /* destination x & y */
+          - dsize/2, - dsize/2,
+          /* destination width and height */
+          dsize, dsize
+        );
+        ctx.restore();
+        return;
+      }
+
+      ctx.drawImage(
+        spritesheet,
+
+        /* source x & y */
+        tile.x*TILE_SIZE, tile.y*TILE_SIZE,
+        /* source width and height */
+        tile.w*TILE_SIZE, tile.h*TILE_SIZE,
+
+        /* destination x & y */
+        dx - dsize/2, dy - dsize/2,
+        /* destination width and height */
+        dsize, dsize
+      );
+    }
 
     for (const { x, y } of world.sprinklers) {
       const size = 0.05;
-      ctx.fillStyle = "blue";
-      ctx.fillRect(x - size/2, y - size/2, size, size);
+      // ctx.fillStyle = "blue";
+      // ctx.fillRect(x - size/2, y - size/2, size, size);
+      draw_tile(TILE_PLAYER, x, y, size);
     }
     for (const { x, y, death_tick } of world.particles) {
-      const size = 0.01;
+      const size = 0.05;
 
       /* canvas treats alphas > 1 the same as 1 */
       const ttl = death_tick - world.tick;
       ctx.globalAlpha = ttl / SECOND_IN_TICKS;
 
-      ctx.fillStyle = "purple";
-      ctx.fillRect(x - size/2, y - size/2, size, size);
+      // ctx.fillStyle = "purple";
+      // ctx.fillRect(x - size/2, y - size/2, size, size);
+      draw_tile(TILE_SPEAR, x, y, size, world.tick*0.1);
 
       /* bad things happen if you forget to reset this */
       ctx.globalAlpha = 1.0;
