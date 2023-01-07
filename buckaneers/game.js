@@ -7,6 +7,7 @@ const NODE = !BROWSER;
 const SECOND_IN_TICKS = 60; 
 
 /* vektorr maffz */
+function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }
 function mag(x, y) { return Math.sqrt(x*x + y*y); }
 function norm(obj) {
   const m = mag(obj.x, obj.y);
@@ -287,6 +288,7 @@ const default_state = () => {
   const default_player = () => ({
     /* could prolly have server assign ids but i dont foresee a collision */
     id: Math.floor(Math.random() * 99999999999),
+    cam: { x: 0, y: 0 },
     world: default_world(),
     last_world: default_world(),
   });
@@ -357,6 +359,8 @@ function client(canvas, state) {
   canvas.onmousedown = ({ offsetX: x, offsetY: y }) => {
     x /= canvas.width;
     y /= canvas.width;
+    x += state.cam.x;
+    y += state.cam.y;
     send_host(id, JSON.stringify(["shoot_at", { x, y }]));
   }
 
@@ -375,12 +379,14 @@ function client(canvas, state) {
       state.world = payload;
   }
 
-  render(canvas, state.world, state.last_world);
+  render(canvas, state);
 }
 
 const spritesheet = new Image();
 spritesheet.src = "art.png";
-function render(canvas, world, last_world) {
+function render(canvas, state) {
+  const { world, last_world, cam } = state;
+
   /* initialize canvas */
   const ctx = canvas.getContext("2d");
 
@@ -388,12 +394,25 @@ function render(canvas, world, last_world) {
   ctx.fillStyle = "white";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  /* lerp camera */
+  {
+    const me = world.players.find(x => x.id == world.you);
+    if (me) {
+      const ideal_cam_x = me.x - 0.5;
+      const ideal_cam_y = me.y - (canvas.height/canvas.width)*0.5;
+      cam.x = lerp(cam.x, ideal_cam_x, 0.08);
+      cam.y = lerp(cam.y, ideal_cam_y, 0.08);
+    }
+  }
+
   ctx.save(); {
     /* make the window wider, it'll zoom.
      * make the window longer, it'll just show more.
      *
      * also, instead of pixels the units are now "screen widths" */
     ctx.scale(canvas.width, canvas.width);
+
+    ctx.translate(-cam.x, -cam.y);
 
     /* fill in background */
     ctx.fillStyle = "snow";
