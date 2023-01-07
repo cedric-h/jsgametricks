@@ -36,11 +36,13 @@ const SECOND_IN_TICKS = 60;
  * run node game.js and go to localhost:8080
  *
  * How is this possible? By defining three simple functions that the
- * "host" uses to to talk to the clients.
+ * "host" uses to to talk to the clients, and vice versa.
+ *
+ * We then implement this API once with websockets, and once by passing the networked messages directly.
  *
  * Before I show you those functions, let's take a look at the role of
  * the host and of the clients. You can probably guess what the functions
- * are.
+ * will be.
  *
  * host:
  *  - each of the clients can send messages to it
