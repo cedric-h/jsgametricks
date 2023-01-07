@@ -6,22 +6,37 @@ const NODE = !BROWSER;
 
 const SECOND_IN_TICKS = 60; 
 
+/* vektorr maffz */
+function mag(x, y) { return Math.sqrt(x*x + y*y); }
+function norm(obj) {
+  const m = mag(obj.x, obj.y);
+  if (m > 0.0)
+    obj.x /= m,
+    obj.y /= m;
+  return obj;
+}
+
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
 
   const default_state = () => {
     const ret = {
       tick: 0,
+
+      /* players are separate from their mailboxes,
+       * because we can start sending you networking messages
+       * before you're actually moving around in the game
+       * in short: client/mailbox = networking, player = ent in game */
+      mailbox: [],
+      client_mailboxes: {},
+
       /* ids are important so clients can track entities across frames,
        * allowing them to smooth out their movement across sparse updates
        * (aka interpolation) */
       id_gen: 0,
       particles: [],
-      mailbox: [],
       players: {},
-      sprinklers: [],
     };
-    ret.sprinklers.push({ x: 0.5, y: 0.5, id: ret.id_gen++ });
     return ret;
   };
 
@@ -58,11 +73,11 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     const state = host_state();
 
     /* we won't have messages for a client we've never heard of */
-    if (!(sender_id in state.players))
+    if (!(sender_id in state.client_mailboxes))
       /* but we will register you for later */
-      state.players[sender_id] = { mailbox: [] };
+      state.client_mailboxes[sender_id] = [];
 
-    const mailbox = state.players[sender_id].mailbox;
+    const mailbox = state.client_mailboxes[sender_id];
 
     /* nothing to see here */
     if (mailbox.length == 0) {
@@ -83,18 +98,37 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       const { sender_id, msg } = state.mailbox.pop();
 
       /* you're not in our records, you must be new */
-      if (!(sender_id in state.players))
-        state.players[sender_id] = { mailbox: [] };
+      if (!(sender_id in state.client_mailboxes))
+        state.client_mailboxes[sender_id] = [];
 
       const [type, payload] = JSON.parse(msg);
 
-      if (type == "sprinkler_place") {
+      if (type == "shoot_at") {
+        /* uh you can't do this before you're spawned in */
+        if (!(sender_id in state.players)) continue;
+        const player = state.players[sender_id];
+
         const { x, y } = payload;
-        state.sprinklers.push({ x, y, id: state.idgen++ })
+
+        const d = norm({ x: x - player.x,
+                         y: y - player.y });
+
+        player.x += d.x * 0.03;
+        player.y += d.y * 0.03;
+
+        state.particles.push({
+          id: state.idgen++,
+
+          x: player.x,
+          y: player.y,
+          death_tick: state.tick + SECOND_IN_TICKS*10,
+
+          vx: d.x,
+          vy: d.y,
+        });
       }
 
       if (type == "dev_reset" && BROWSER_HOST) {
-        console.log("hmm");
         state = null;
         dev_cache_state(null);
         window.location.reload();
@@ -102,41 +136,62 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     }
 
     {
+      /* spawn a player for each client mailbox (if not one already)
+       * (if we ever have a spectator mode or char creation screen,
+       *  this won't make sense anymore) */
+      for (const p_id in state.client_mailboxes) {
+        if (!(p_id in state.players))
+          state.players[p_id] = {
+            x: 0.5,
+            y: 0.5,
+            id: state.id_gen++
+          };
+      }
+
       /* discard the fields we don't want to send them */
-      const { tick, sprinklers } = state;
+      const { tick } = state;
       const particles = state.particles.map(({ id, x, y, death_tick }) => {
         const ttl = death_tick - state.tick;
         return { id, x, y, ttl };
       });
+      const players = Object
+        .values(state.players)
+        .map(({ id, x, y }) => ({ id, x, y }));
 
-      for (const p_id in state.players) {
-        const p = state.players[p_id];
-        p.mailbox.unshift(JSON.stringify([
+      for (const p_id in state.client_mailboxes) {
+        const mailbox = state.client_mailboxes[p_id];
+
+        /* maybe confusing, but we're going from
+         * "id of client with mailbox" to
+         * "id of entity in game they control" */
+        const you = state.players[p_id].id;
+
+        mailbox.unshift(JSON.stringify([
           "tick",
-          { tick, sprinklers, particles }
+          { tick, players, particles, you }
         ]));
       }
     }
 
     state.tick++;
 
-    for (const sprink of state.sprinklers) {
-      /* ten times a second, sprinklers spawn particles */
-      if ((state.tick % SECOND_IN_TICKS/10) == 0) {
-        state.particles.push({
-          id: state.idgen++,
+    // for (const sprink of state.sprinklers) {
+    //   /* ten times a second, sprinklers spawn particles */
+    //   if ((state.tick % SECOND_IN_TICKS*5) == 0) {
+    //     state.particles.push({
+    //       id: state.idgen++,
 
-          x: sprink.x,
-          y: sprink.y,
-          death_tick: state.tick + SECOND_IN_TICKS*10,
+    //       x: sprink.x,
+    //       y: sprink.y,
+    //       death_tick: state.tick + SECOND_IN_TICKS*10,
 
-          /* turn the current tick into an angle,
-           * and from an angle into a velocity vector. */
-          vx: Math.cos(state.tick + sprink.x*10),
-          vy: Math.sin(state.tick + sprink.y*10),
-        });
-      }
-    }
+    //       /* turn the current tick into an angle,
+    //        * and from an angle into a velocity vector. */
+    //       vx: Math.cos(state.tick + sprink.x*10),
+    //       vy: Math.sin(state.tick + sprink.y*10),
+    //     });
+    //   }
+    // }
 
     state.particles = state.particles.filter(part => {
       /* should be straight forward */
@@ -225,7 +280,7 @@ if (NODE) {
 /* default client state */
 const default_state = () => {
   const default_world = () => ({
-    sprinklers: [],
+    players: [],
     particles: [],
     tick: 0
   });
@@ -302,7 +357,7 @@ function client(canvas, state) {
   canvas.onmousedown = ({ offsetX: x, offsetY: y }) => {
     x /= canvas.width;
     y /= canvas.width;
-    send_host(id, JSON.stringify(["sprinkler_place", { x, y }]));
+    send_host(id, JSON.stringify(["shoot_at", { x, y }]));
   }
 
   canvas.onkeydown = e => {
@@ -344,8 +399,9 @@ function render(canvas, world, last_world) {
     ctx.fillStyle = "snow";
     ctx.fillRect(0, 0, 1, 1);
 
-    const TILE_PLAYER = { w: 1, h: 1, x: 0, y: 8 };
-    const TILE_SPEAR  = { w: 1, h: 1, x: 4, y: 9 };
+    const TILE_PLAYER  = { w: 1, h: 1, x: 0, y: 8 };
+    const TILE_PLAYER0 = { w: 1, h: 1, x: 2, y: 8 };
+    const TILE_SPEAR   = { w: 1, h: 1, x: 4, y: 9 };
 
     const draw_tile = (tile, dx, dy, dsize, angle) => {
       const TILE_SIZE = spritesheet.height/11;
@@ -386,10 +442,11 @@ function render(canvas, world, last_world) {
       );
     }
 
-    for (const { x, y } of world.sprinklers) {
+    for (const { id, x, y } of world.players) {
       const size = 0.05;
 
-      draw_tile(TILE_PLAYER, x, y, size);
+      const tile = id == world.you ? TILE_PLAYER0 : TILE_PLAYER;
+      draw_tile(tile, x, y, size);
     }
     for (const { x, y, death_tick, id } of world.particles) {
       const size = 0.05;
