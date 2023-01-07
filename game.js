@@ -17,11 +17,30 @@ const SECOND_IN_TICKS = 60;
 
 /* -- NETSIM: USING CODE TO PRETEND YOU HAVE FRIENDS -- */
 
-/* Being able to step through your application in a debugger is nice:
- * Why not make it so you can step through your _entire_ application,
- * server and client, seamlessly?
+/* Be me.
  *
- * (also, I'll admit, I just like having everything in the same file)
+ * You want to make sure your web game's netcode works -- because let's
+ * be honest, you have no idea what you're doing and you've heard netcode
+ * is hard -- but juggling different tabs with your game open is tedious,
+ * especially because you're constantly changing the code and everything
+ * gets all out of sync.
+ *
+ * The second window keeps breaking everything because it's running old code!
+ *
+ * And when you try to step through in a debugger, it's hard to pick up
+ * where the server left off.
+ *
+ * This demo application shows you how to run client and server not only
+ * from the same file, but from the same browser window, until you're
+ * ready to test with someone over the network, in which case you just
+ * run node game.js and go to localhost:8080
+ *
+ * How is this possible? By defining three simple functions that the
+ * "host" uses to to talk to the clients.
+ *
+ * Before I show you those functions, let's take a look at the role of
+ * the host and of the clients. You can probably guess what the functions
+ * are.
  *
  * host:
  *  - each of the clients can send messages to it
@@ -32,9 +51,25 @@ const SECOND_IN_TICKS = 60;
  *  - can't talk directly to other clients
  *  - takes updates from host and draws them on the screen
  *  - also sends input events to the server
+ *
+ *
+ * The functions are:
+ * host_tick:
+ *   do game logic!
+ *   process the messages in my mailbox, fill client mailboxes!
+ *
+ * send_host:
+ *   put something in the host's mailbox!
+ *
+ * recv_from_host:
+ *   pop something out of the mailbox the host maintains for you.
  * 
- * We can "send messages" all from within the same browser window,
- * no problem!
+ *
+ * We have two implementations of these functions, one that connects
+ * the mailboxes via WebSockets, and one that simply uses function calls.
+ *
+ * This lets us simulate our networking ...
+ * and do the real thing, with the same API.
  *
  * We just have to keep a couple things in mind:
  *  - these messages have to be the ONLY way we communicate between "host" and client code
@@ -44,7 +79,7 @@ const SECOND_IN_TICKS = 60;
  * A mailbox is exactly what it sounds like: an array of messages from someone else on the network.
  * (they're a lot more compatible with the localStorage hack than the default node websockets API)
  *
- * Let's try one where clients come up with IDs for themselves, and then communicate with the host like so:
+ * Let's try an API where clients come up with IDs for themselves, and then communicate with the host like so:
  *  
  *    const bob_id = 42069;
  *    send_host(bob_id, "hi im bob");
@@ -52,7 +87,7 @@ const SECOND_IN_TICKS = 60;
  *    // returns zero if the server doesn't have a message for you
  *    const msg = recv_from_host(bob_id);
  *
- * Let's see what it looks like to implement a version of this API
+ * Let's start with a simple isolated example of this API
  * that doesn't use websockets, and instead just passes the message
  * along.
  *
