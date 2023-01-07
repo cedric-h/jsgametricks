@@ -9,15 +9,21 @@ const SECOND_IN_TICKS = 60;
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
 
-  const default_state = () => ({
-    tick: 0,
-    particles: [],
-    mailbox: [],
-    players: {},
-    sprinklers: [
-      { x: 0.5, y: 0.5 },
-    ],
-  });
+  const default_state = () => {
+    const ret = {
+      tick: 0,
+      /* ids are important so clients can track entities across frames,
+       * allowing them to smooth out their movement across sparse updates
+       * (aka interpolation) */
+      id_gen: 0,
+      particles: [],
+      mailbox: [],
+      players: {},
+      sprinklers: [],
+    };
+    ret.sprinklers.push({ x: 0.5, y: 0.5, id: state.id_gen++ });
+    return ret;
+  };
 
   /* make state persist across code-reloads in browser */
   let host_state, dev_cache_state;
@@ -83,16 +89,16 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       if (type == "sprinkler_place") {
         const { x, y } = payload;
-        state.sprinklers.push({ x, y })
+        state.sprinklers.push({ x, y, id: state.idgen++ })
       }
     }
 
     {
       /* discard the fields we don't want to send them */
       const { tick, sprinklers } = state;
-      const particles = state.particles.map(({ x, y, death_tick }) => {
+      const particles = state.particles.map(({ id, x, y, death_tick }) => {
         const ttl = death_tick - state.tick;
-        return { x, y, ttl };
+        return { id, x, y, ttl };
       });
 
       for (const p_id in state.players) {
@@ -110,6 +116,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       /* ten times a second, sprinklers spawn particles */
       if ((state.tick % SECOND_IN_TICKS/10) == 0) {
         state.particles.push({
+          id: state.idgen++,
+
           x: sprink.x,
           y: sprink.y,
           death_tick: state.tick + SECOND_IN_TICKS*10,
@@ -208,13 +216,16 @@ if (NODE) {
 
 /* default client state */
 const default_state = () => {
+  const default_world = () => ({
+    sprinklers: [],
+    particles: [],
+    tick: 0
+  });
   const default_player = () => ({
+    /* could prolly have server assign ids but i dont foresee a collision */
     id: Math.floor(Math.random() * 99999999999),
-    world: {
-      sprinklers: [],
-      particles: [],
-      tick: 0
-    }
+    world: default_world(),
+    last_world: default_world(),
   });
 
   return {
@@ -290,15 +301,16 @@ function client(canvas, state) {
     const [type, payload] = JSON.parse(msg);
 
     if (type == "tick")
+      state.last_world = state.world,
       state.world = payload;
   }
 
-  render(canvas, state.world);
+  render(canvas, state.world, state.last_world);
 }
 
 const spritesheet = new Image();
 spritesheet.src = "art.png";
-function render(canvas, world) {
+function render(canvas, world, last_world) {
   /* initialize canvas */
   const ctx = canvas.getContext("2d");
 
@@ -361,20 +373,21 @@ function render(canvas, world) {
 
     for (const { x, y } of world.sprinklers) {
       const size = 0.05;
-      // ctx.fillStyle = "blue";
-      // ctx.fillRect(x - size/2, y - size/2, size, size);
+
       draw_tile(TILE_PLAYER, x, y, size);
     }
-    for (const { x, y, death_tick } of world.particles) {
+    for (const { x, y, death_tick, id } of world.particles) {
       const size = 0.05;
 
       /* canvas treats alphas > 1 the same as 1 */
       const ttl = death_tick - world.tick;
       ctx.globalAlpha = ttl / SECOND_IN_TICKS;
 
-      // ctx.fillStyle = "purple";
-      // ctx.fillRect(x - size/2, y - size/2, size, size);
-      draw_tile(TILE_SPEAR, x, y, size, world.tick*0.1);
+      const last_pos = last_world.particles.find(x => x.id == id);
+      const angle = last_pos ? Math.atan2(y - last_pos.y,
+                                          x - last_pos.x) : world.tick*0.1;
+
+      draw_tile(TILE_SPEAR, x, y, size, angle + Math.PI/2);
 
       /* bad things happen if you forget to reset this */
       ctx.globalAlpha = 1.0;
