@@ -114,9 +114,6 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         const d = norm({ x: x - player.x,
                          y: y - player.y });
 
-        player.x += d.x * 0.03;
-        player.y += d.y * 0.03;
-
         state.particles.push({
           id: state.idgen++,
 
@@ -127,6 +124,17 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           vx: d.x,
           vy: d.y,
         });
+      }
+
+      if (type == "move" && BROWSER_HOST) {
+        /* uh you can't do this before you're spawned in */
+        if (!(sender_id in state.players)) continue;
+        const player = state.players[sender_id];
+
+        const { x, y } = norm(payload);
+
+        player.vx = x;
+        player.vy = y;
       }
 
       if (type == "dev_reset" && BROWSER_HOST) {
@@ -145,8 +153,16 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           state.players[p_id] = {
             x: 0.5,
             y: 0.5,
+            vx: 0.0,
+            vy: 0.0,
             id: state.id_gen++
           };
+      }
+
+      for (const p_id in state.players) {
+        const p = state.players[p_id];
+        p.x += p.vx * 0.003;
+        p.y += p.vy * 0.003;
       }
 
       /* discard the fields we don't want to send them */
@@ -289,6 +305,7 @@ const default_state = () => {
     /* could prolly have server assign ids but i dont foresee a collision */
     id: Math.floor(Math.random() * 99999999999),
     cam: { x: 0, y: 0 },
+    keysdown: {},
     world: default_world(),
     last_world: default_world(),
   });
@@ -296,6 +313,7 @@ const default_state = () => {
   return {
     p1: default_player(),
     p2: SPLITSCREEN ? default_player() : undefined,
+    last_clicked: 'p1',
   };
 }
 
@@ -340,7 +358,24 @@ if (BROWSER) window.onload = function frame() {
     client(p1, state.p1);
     client(p2, state.p2);
 
-    window.onkeydown = e => (p1.onkeydown(e), p2.onkeydown(e));
+    window.onmousedown = e => {
+      const state = client_state();
+      if (e.target == p1) state.last_clicked = 'p1';
+      if (e.target == p2) state.last_clicked = 'p2';
+      dev_cache_state(state);
+    };
+    window.onkeydown = e => {
+      const state = client_state();
+      if (state.last_clicked == 'p1') p1.onkeydown(state.p1, e);
+      if (state.last_clicked == 'p2') p2.onkeydown(state.p2, e);
+      dev_cache_state(state);
+    }
+    window.onkeyup = e => {
+      const state = client_state();
+      if (state.last_clicked == 'p1') p1.onkeyup(state.p1, e);
+      if (state.last_clicked == 'p2') p2.onkeyup(state.p2, e);
+      dev_cache_state(state);
+    }
   } else {
     const p1 = document.getElementById("player1");
     p1.width  = window.innerWidth;
@@ -364,8 +399,15 @@ function client(canvas, state) {
     send_host(id, JSON.stringify(["shoot_at", { x, y }]));
   }
 
-  canvas.onkeydown = e => {
-    if (e.key == "Escape")
+  /* using virtual keycodes makes it so that WASD still works
+   * even if you use colemak or dvorak etc. */
+  canvas.onkeyup = (state, e) => {
+    state.keysdown[e.code] = 0;
+  }
+  canvas.onkeydown = (state, e) => {
+    state.keysdown[e.code] = 1;
+
+    if (e.code == 'Escape')
       send_host(id, JSON.stringify(["dev_reset"]));
   };
 
@@ -378,6 +420,14 @@ function client(canvas, state) {
       state.last_world = state.world,
       state.world = payload;
   }
+
+  const move = { x: 0, y: 0 };
+  if (state.keysdown.KeyW) move.y -= 1;
+  if (state.keysdown.KeyS) move.y += 1;
+  if (state.keysdown.KeyA) move.x -= 1;
+  if (state.keysdown.KeyD) move.x += 1;
+  send_host(id, JSON.stringify(["move", norm(move)]));
+
 
   render(canvas, state);
 }
