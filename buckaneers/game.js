@@ -21,7 +21,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       players: {},
       sprinklers: [],
     };
-    ret.sprinklers.push({ x: 0.5, y: 0.5, id: state.id_gen++ });
+    ret.sprinklers.push({ x: 0.5, y: 0.5, id: ret.id_gen++ });
     return ret;
   };
 
@@ -58,16 +58,17 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     const state = host_state();
 
     /* we won't have messages for a client we've never heard of */
-    if (!(sender_id in state.players)) {
+    if (!(sender_id in state.players))
       /* but we will register you for later */
       state.players[sender_id] = { mailbox: [] };
-      return 0;
-    }
 
     const mailbox = state.players[sender_id].mailbox;
 
     /* nothing to see here */
-    if (mailbox.length == 0) return 0;
+    if (mailbox.length == 0) {
+      dev_cache_state(state);
+      return 0;
+    }
 
     const ret = mailbox.pop();
 
@@ -76,20 +77,27 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
   }
 
   host_tick = () => {
-    const state = host_state();
+    let state = host_state();
 
     while (state.mailbox.length > 0) {
       const { sender_id, msg } = state.mailbox.pop();
 
-        /* you're not in our records, you must be new */
-        if (!(sender_id in state.players))
-          state.players[sender_id] = { mailbox: [] };
+      /* you're not in our records, you must be new */
+      if (!(sender_id in state.players))
+        state.players[sender_id] = { mailbox: [] };
 
       const [type, payload] = JSON.parse(msg);
 
       if (type == "sprinkler_place") {
         const { x, y } = payload;
         state.sprinklers.push({ x, y, id: state.idgen++ })
+      }
+
+      if (type == "dev_reset" && BROWSER_HOST) {
+        console.log("hmm");
+        state = null;
+        dev_cache_state(null);
+        window.location.reload();
       }
     }
 
@@ -274,6 +282,8 @@ if (BROWSER) window.onload = function frame() {
 
     client(p1, state.p1);
     client(p2, state.p2);
+
+    window.onkeydown = e => (p1.onkeydown(e), p2.onkeydown(e));
   } else {
     const p1 = document.getElementById("player1");
     p1.width  = window.innerWidth;
@@ -294,6 +304,11 @@ function client(canvas, state) {
     y /= canvas.width;
     send_host(id, JSON.stringify(["sprinkler_place", { x, y }]));
   }
+
+  canvas.onkeydown = e => {
+    if (e.key == "Escape")
+      send_host(id, JSON.stringify(["dev_reset"]));
+  };
 
   /* take messages from server */
   let msg;
@@ -384,8 +399,8 @@ function render(canvas, world, last_world) {
       ctx.globalAlpha = ttl / SECOND_IN_TICKS;
 
       const last_pos = last_world.particles.find(x => x.id == id);
-      const angle = last_pos ? Math.atan2(y - last_pos.y,
-                                          x - last_pos.x) : world.tick*0.1;
+      if (!last_pos) continue;
+      const angle = Math.atan2(y - last_pos.y, x - last_pos.x);
 
       draw_tile(TILE_SPEAR, x, y, size, angle + Math.PI/2);
 
