@@ -5,6 +5,8 @@ const BROWSER = (typeof window) == "object";
 const NODE = !BROWSER;
 
 const SECOND_IN_TICKS = 60; 
+const SPEAR_RELEASE_FWD = 0.04;
+const SPEAR_RELEASE_OUT = 0.027;
 
 /* vektorr maffz */
 function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }
@@ -116,29 +118,24 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       const [type, payload] = JSON.parse(msg);
 
-      if (type == "shoot_at") {
+      if (type == "attack") {
         /* uh you can't do this before you're spawned in */
         if (!(sender_id in state.players)) continue;
         const player = state.players[sender_id];
 
         const { x, y } = payload;
-
         const d = norm({ x: x - player.x,
                          y: y - player.y });
 
-        state.particles.push({
-          id: state.idgen++,
-
-          x: player.x,
-          y: player.y,
-          death_tick: state.tick + SECOND_IN_TICKS*10,
-
-          vx: d.x,
-          vy: d.y,
-        });
+        player.attack.dx = d.x;
+        player.attack.dy = d.y;
+        player.attack.tick_msg_latest = state.tick;
+        if (player.attack.streak == 'dormant')
+          player.attack.streak = 'active',
+          player.attack.tick_msg_earliest = state.tick;
       }
 
-      if (type == "move" && BROWSER_HOST) {
+      if (type == "move") {
         /* uh you can't do this before you're spawned in */
         if (!(sender_id in state.players)) continue;
         const player = state.players[sender_id];
@@ -167,14 +164,61 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
             y: 0.5,
             vx: 0.0,
             vy: 0.0,
+            attack: {
+              tick_msg_earliest: 0,
+              tick_msg_latest: 0,
+              tick_cooldown_over: 0,
+              streak: 'dormant', // 'dormant' | 'cooldown' | 'active'
+              dx: 0,
+              dy: 0,
+            },
             id: state.id_gen++
           };
       }
 
+
+      const ATTACK_TIMEOUT = SECOND_IN_TICKS*0.2;
+      const ATTACK_PREPARE_DURATION = SECOND_IN_TICKS*0.8;
       for (const p_id in state.players) {
         const p = state.players[p_id];
         p.x += p.vx * 0.003;
         p.y += p.vy * 0.003;
+
+
+        if (p.attack.streak == 'dormant') continue;
+        if (p.attack.streak == 'cooldown') {
+          if (state.tick >= p.attack.tick_cooldown_over)
+            p.attack.streak = 'dormant';
+          continue;
+        }
+
+        /* you broke the streak, we're going back to dormant */
+        const ticks_since_latest = state.tick - p.attack.tick_msg_latest;
+        if (ticks_since_latest >= ATTACK_TIMEOUT)
+          // console.log("streak broken by timeout"),
+          p.attack.streak = 'dormant';
+
+        /* you waited the full time without breaking the streak, you attack */
+        const ticks_since_earliest = state.tick - p.attack.tick_msg_earliest;
+        const prog = ticks_since_earliest / ATTACK_PREPARE_DURATION;
+        if (prog >= 1) {
+          // console.log("streak broken by completion");
+          const a = p.attack;
+
+          a.streak = 'cooldown';
+          a.tick_cooldown_over = state.tick + 1.5*SECOND_IN_TICKS;
+
+          state.particles.push({
+            id: state.idgen++,
+
+            x: p.x + a.dx*SPEAR_RELEASE_FWD - a.dy*SPEAR_RELEASE_OUT,
+            y: p.y + a.dy*SPEAR_RELEASE_FWD + a.dx*SPEAR_RELEASE_OUT,
+            death_tick: state.tick + SECOND_IN_TICKS*10,
+
+            vx: a.dx,
+            vy: a.dy,
+          });
+        }
       }
 
       /* discard the fields we don't want to send them */
@@ -185,6 +229,23 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       const players = Object
         .values(state.players)
         .map(({ id, x, y }) => ({ id, x, y }));
+
+      for (let i = 0; i < players.length; i++) {
+        const { attack } = Object.values(state.players)[i];
+        const p_msg = players[i];
+
+        if (attack.streak == 'dormant') continue;
+
+        const ticks_since_earliest = state.tick - attack.tick_msg_earliest;
+        const prog = ticks_since_earliest / ATTACK_PREPARE_DURATION;
+        if (prog >= 0 && prog <= 1.1) {
+          p_msg.attack = {
+            prog: prog,
+            dx: attack.dx,
+            dy: attack.dy,
+          }
+        }
+      }
 
       for (const p_id in state.client_mailboxes) {
         const mailbox = state.client_mailboxes[p_id];
@@ -329,7 +390,15 @@ const default_state = () => {
     /* could prolly have server assign ids but i dont foresee a collision */
     id: Math.floor(Math.random() * 99999999999),
     cam: { x: 0, y: 0 },
+
+    /* input */
     keysdown: {},
+    mousedown: false,
+    mousepos: false,
+    attack_dir: 0.0,
+    attack_countdown: 0.0,
+
+    /* data from server */
     world: default_world(),
     last_world: default_world(),
   });
@@ -365,14 +434,48 @@ if (BROWSER_HOST) {
   dev_cache_state = state => LS.setItem(key, JSON.stringify(state));
 }
 
-let last, host_tick_accumulator = 0;
+let host_last, last, host_tick_accumulator = 0;
 if (BROWSER) window.onload = function frame(elapsed) {
   requestAnimationFrame(frame);
 
+  let dt = 0;
+  if (last != undefined) dt = elapsed - last;
+  last = elapsed;
+
+  window.onmousedown = e => {
+    const state = client_state();
+    state.last_clicked = e.target.id;
+
+    client_mouse_event(
+      e.target,
+      state[state.last_clicked],
+      { type: 'mousedown', x: e.offsetX, y: e.offsetY },
+    );
+    dev_cache_state(state);
+  };
+  window.onmousemove = e => {
+    const state = client_state();
+    client_mouse_event(
+      document.getElementById(state.last_clicked),
+      state[state.last_clicked],
+      { type: 'mousemove', x: e.offsetX, y: e.offsetY },
+    );
+    dev_cache_state(state);
+  }
+  window.onmouseup = e => {
+    const state = client_state();
+    client_mouse_event(
+      document.getElementById(state.last_clicked),
+      state[state.last_clicked],
+      { type: 'mouseup', x: e.offsetX, y: e.offsetY },
+    );
+    dev_cache_state(state);
+  }
+
   const state = client_state();
   if (SPLITSCREEN) {
-    const p1 = document.getElementById("player1");
-    const p2 = document.getElementById("player2");
+    const p1 = document.getElementById("p1");
+    const p2 = document.getElementById("p2");
     p2.width  = p1.width  = window.innerWidth;
     p2.height = p1.height = window.innerHeight / 2;
 
@@ -381,15 +484,9 @@ if (BROWSER) window.onload = function frame(elapsed) {
     p2.style.bottom = '0px';
     p2.style.left = '0px';
 
-    client(p1, elapsed, state.p1);
-    client(p2, elapsed, state.p2);
+    client(state.p1, p1, elapsed, dt);
+    client(state.p2, p2, elapsed, dt);
 
-    window.onmousedown = e => {
-      const state = client_state();
-      if (e.target == p1) state.last_clicked = 'p1';
-      if (e.target == p2) state.last_clicked = 'p2';
-      dev_cache_state(state);
-    };
     window.onkeydown = e => {
       const state = client_state();
       if (state.last_clicked == 'p1') p1.onkeydown(state.p1, e);
@@ -403,7 +500,7 @@ if (BROWSER) window.onload = function frame(elapsed) {
       dev_cache_state(state);
     }
   } else {
-    const p1 = document.getElementById("player1");
+    const p1 = document.getElementById("p1");
     p1.width  = window.innerWidth;
     p1.height = window.innerHeight;
     client(p1, elapsed, state.p1);
@@ -416,12 +513,20 @@ if (BROWSER) window.onload = function frame(elapsed) {
      *
      * (this makes the speed of objects uniform) */
 
-    if (isFinite(elapsed) && isFinite(last))
-      host_tick_accumulator += elapsed - last;
-    last = elapsed;
+    // const bad_fps = 1000/40;
+    // const now = Math.floor(elapsed/bad_fps)*bad_fps;
+    const now = elapsed;
+    if (isFinite(elapsed) && isFinite(host_last))
+      host_tick_accumulator += now - host_last;
+    host_last = now;
 
-    while (host_tick_accumulator > 1000/60) {
-      host_tick_accumulator -= 1000/60;
+    /* if we owe more than 100 ticks, we're fucked */
+    const TICK_MS = 1000/SECOND_IN_TICKS;
+    if (host_tick_accumulator/TICK_MS > 100)
+      host_tick_accumulator = 0;
+
+    while (host_tick_accumulator > TICK_MS) {
+      host_tick_accumulator -= TICK_MS;
       host_tick();
     }
   }
@@ -431,39 +536,70 @@ if (BROWSER) window.onload = function frame(elapsed) {
     host_tick();
 }
 
-function client(canvas, elapsed, state) {
+function client_mouse_event(canvas, state, ev) {
+  let { type, x, y } = ev;
+
+  /* translate to world coordinates */
+  x /= canvas.width;
+  y /= canvas.width;
+  x += state.cam.x;
+  y += state.cam.y;
+  state.mousepos = { x, y };
+
+  state.attack_countdown = 0;
+
+  if (type == 'mouseup'  ) state.mousedown = false;
+  if (type == 'mousedown') state.mousedown = true;
+}
+
+const SPEAR_ROTATE_SPEED = 0.007;
+function client(state, canvas, elapsed, dt) {
+  client_last = elapsed;
+
   const id = state.id;
 
-  /* send messages to server */
-  canvas.onmousedown = ({ offsetX: x, offsetY: y }) => {
-    x /= canvas.width;
-    y /= canvas.width;
-    x += state.cam.x;
-    y += state.cam.y;
-    send_host(id, JSON.stringify(["shoot_at", { x, y }]));
-  }
-
-  /* using virtual keycodes makes it so that WASD still works
-   * even if you use colemak or dvorak etc. */
-  canvas.onkeyup = (state, e) => {
-    state.keysdown[e.code] = 0;
-  }
-  canvas.onkeydown = (state, e) => {
-    state.keysdown[e.code] = 1;
-
-    if (e.code == 'Escape')
-      send_host(id, JSON.stringify(["dev_reset"]));
-  };
-
   /* take messages from server */
+  const world_b4 = state.world;
   let msg;
   while (msg = recv_from_host(id)) {
     const [type, payload] = JSON.parse(msg);
 
     if (type == "tick")
-      state.last_world = state.world,
       state.world = payload;
   }
+  /* some hacks in rendering code rely on monotonically increasing worlds */
+  if (state.world != world_b4) state.last_world = world_b4;
+
+  /* send messages to server */
+  if (state.mousedown) {
+    const player = state.world.players.find(x => x.id == state.world.you);
+    const ideal_dir = Math.atan2(state.mousepos.y - player.y,
+                                 state.mousepos.x - player.x);
+    const distance = rad_distance(state.attack_dir, ideal_dir);
+    const force = Math.min(dt*SPEAR_ROTATE_SPEED, Math.abs(distance));
+    state.attack_dir += force*Math.sign(distance);
+
+    if (dt > 1.5*(1000/60)) state.attack_dir = ideal_dir;
+
+    state.attack_countdown -= dt;
+    if (state.attack_countdown <= 0) {
+      state.attack_countdown = 1000/60 * 5;
+      send_host(id, JSON.stringify(["attack", {
+        x: player.x + Math.cos(state.attack_dir),
+        y: player.y + Math.sin(state.attack_dir),
+      }]));
+    }
+  }
+
+  /* using virtual keycodes makes it so that WASD still works
+   * even if you use colemak or dvorak etc. */
+  canvas.onkeyup = (state, e) => state.keysdown[e.code] = 0;
+  canvas.onkeydown = (state, e) => {
+    state.keysdown[e.code] = 1;
+
+    if (e.code == 'Escape' && BROWSER_HOST)
+      send_host(id, JSON.stringify(["dev_reset"]));
+  };
 
   const move = { x: 0, y: 0 };
   if (state.keysdown.KeyW) move.y -= 1;
@@ -472,17 +608,12 @@ function client(canvas, elapsed, state) {
   if (state.keysdown.KeyD) move.x += 1;
   send_host(id, JSON.stringify(["move", norm(move)]));
 
-
-  render(canvas, elapsed, state);
+  render(state, canvas, elapsed, dt);
 }
 
 const spritesheet = new Image();
 spritesheet.src = "art.png";
-function render(canvas, elapsed, state) {
-  let dt = 0;
-  if (state.last_render != undefined) dt = elapsed - state.last_render;
-  state.last_render = elapsed;
-
+function render(state, canvas, elapsed, dt) {
   const { world, last_world, cam } = state;
 
   /* initialize canvas */
@@ -567,8 +698,8 @@ function render(canvas, elapsed, state) {
     }
 
     for (const p of world.players) {
-      const { id, x, y } = p;
-
+      const { id, x, y, attack } = p;
+      
       const { body, hand } = TILE_PLAYERS[(id == world.you) ? 1 : 0];
 
       const last_pos = last_world.players.find(x => x.id == id);
@@ -585,29 +716,60 @@ function render(canvas, elapsed, state) {
       p.damp = damp;
 
       /* intentional, want perp (also fuck atan2's function signature) */
-      const ideal_angle = (mag(d.x, d.y) > 0)
+      let ideal_angle = (mag(d.x, d.y) > 0)
         ? Math.atan2( -d.x , d.y)
         : last_pos.angle;
+      let speed = 0.007;
+      if (attack) {
+        speed = SPEAR_ROTATE_SPEED;
+        ideal_angle = Math.atan2( attack.dx, -attack.dy );
+      }
 
       const distance = rad_distance(last_pos.angle, ideal_angle);
-      const force = Math.min(dt*0.007, Math.abs(distance));
+      const force = Math.min(dt*speed, Math.abs(distance));
       let angle = last_pos.angle + force*Math.sign(distance);
       p.angle = angle;
 
+      let hanim_x = 0, hanim_y = 0;
+      if (attack) {
+        const t = attack.prog;
+        let fwd = SPEAR_RELEASE_FWD;
+        if (t < 0.8) fwd = lerp(   0, -fwd, t/0.8);
+        else         fwd = lerp(-fwd,  fwd, (t - 0.8)/0.2);
+
+        const forw_x = Math.cos(angle);
+        const forw_y = Math.sin(angle);
+        hanim_x    =  forw_y*t*fwd;
+        hanim_y    = -forw_x*t*fwd;
+        let anim_x =  forw_y*t*(fwd*0.9);
+        let anim_y = -forw_x*t*(fwd*0.9);
+        anim_x += forw_x*SPEAR_RELEASE_OUT;
+        anim_y += forw_y*SPEAR_RELEASE_OUT;
+
+        if (attack.prog < 1.05)
+          draw_tile(TILE_SPEAR, x+anim_x, y+anim_y, TILE_SIZE, angle);
+
+        if (attack.prog > 1) {
+          const t = (attack.prog - 1) / 0.1;
+          hanim_x *= 1 - t;
+          hanim_y *= 1 - t;
+        }
+      }
+
       const jog     = Math.cos(elapsed*0.01    )*0.2*damp;
       const headjog = Math.cos(elapsed*0.01*0.5)*0.2*damp;
-      angle += jog;
+      if (attack == undefined) angle += jog;
 
       const hand_space = TILE_SIZE * 0.58;
       const ox = hand_space*Math.cos(angle) + d.x*jog*8;
       const oy = hand_space*Math.sin(angle) + d.y*jog*8;
 
-      draw_tile(body, x + d.x*headjog*3,
-                      y + d.y*headjog*3, TILE_SIZE);
-      draw_tile(hand, x + ox,
-                      y + oy, TILE_SIZE);
-      draw_tile(hand, x - ox,
-                      y - oy, TILE_SIZE);
+      draw_tile(body, x + d.x*headjog*6,
+                      y + d.y*headjog*6, TILE_SIZE);
+      draw_tile(hand, x + ox + hanim_x,
+                      y + oy + hanim_y, TILE_SIZE);
+      draw_tile(hand, x - ox - hanim_x*0.7,
+                      y - oy - hanim_y*0.7, TILE_SIZE);
     }
     for (const { x, y, death_tick, id } of world.particles) {
       /* canvas treats alphas > 1 the same as 1 */
