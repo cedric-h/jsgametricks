@@ -7,9 +7,19 @@ const NODE = !BROWSER;
 const SECOND_IN_TICKS = 60; 
 const SPEAR_RELEASE_FWD = 0.04;
 const SPEAR_RELEASE_OUT = 0.027;
+const SPEAR_THROW_DIST = 0.35;
+const SPEAR_THROW_SECS = 0.8;
+const SPEAR_FADE_SECS = SPEAR_THROW_SECS*0.2;
+const SPEAR_WIND_UP_RATIO = 0.87;
+
+/* idk, let's have 22 tiles on the screen? */
+/* note: size of players, entities is expressed in terms of tile size */
+const TILE_SIZE = 1/22;
 
 /* vektorr maffz */
+function ease_out_quad(x) { return 1 - (1 - x) * (1 - x); }
 function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }
+function inv_lerp(min, max, p) { return (((p) - (min)) / ((max) - (min))); }
 function lerp_rads(a, b, t) {
   const fmodf = (l, r) => l % r;
   const difference = fmodf(b - a, Math.PI*2.0),
@@ -30,6 +40,25 @@ function norm(obj) {
     obj.y /= m;
   return obj;
 }
+function point_on_line(p, l0_x, l0_y, l1_x, l1_y) {
+  const line_len = (l1_x - l0_x)*(l1_x - l0_x) +
+                   (l1_y - l0_y)*(l1_y - l0_y);
+  const tri_area_x2 = ((p.x - l0_x) * (l1_x - l0_x)) +
+                      ((p.y - l0_y) * (l1_y - l0_y));
+
+  let U = tri_area_x2/line_len;
+  if (U < 0) U = 0;
+  if (U > 1) U = 1;
+  p.x = l0_x + (U * (l1_x - l0_x));
+  p.y = l0_y + (U * (l1_y - l0_y));
+}
+function point_to_line(   x,    y,
+                       l0_x, l0_y,
+                       l1_x, l1_y) {
+  const p = { x, y };
+  point_on_line(p, l0_x, l0_y, l1_x, l1_y);
+  return mag(p.x - x, p.y - y);
+}
 
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
@@ -49,9 +78,20 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
        * allowing them to smooth out their movement across sparse updates
        * (aka interpolation) */
       id_gen: 0,
-      particles: [],
+      spears: [],
+      wolves: {},
       players: {},
     };
+
+    for (let i = 0; i < 10; i++) {
+      const id = ret.id_gen++;
+
+      const t = (i/10) * Math.PI*2;
+      const x = 0.5 + TILE_SIZE*2*Math.cos(t);
+      const y = 0.5 + TILE_SIZE*2*Math.sin(t);
+
+      ret.wolves[id] = { x, y, id, passengers: [] };
+    }
     return ret;
   };
 
@@ -208,27 +248,63 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           a.streak = 'cooldown';
           a.tick_cooldown_over = state.tick + 1.5*SECOND_IN_TICKS;
 
-          state.particles.push({
+          state.spears.push({
             id: state.idgen++,
 
             x: p.x + a.dx*SPEAR_RELEASE_FWD - a.dy*SPEAR_RELEASE_OUT,
             y: p.y + a.dy*SPEAR_RELEASE_FWD + a.dx*SPEAR_RELEASE_OUT,
-            death_tick: state.tick + SECOND_IN_TICKS*10,
+            tick_death: state.tick + SECOND_IN_TICKS*SPEAR_THROW_SECS,
+            tick_birth: state.tick,
 
-            vx: a.dx,
-            vy: a.dy,
+            passengers: {},
+
+            dx: a.dx,
+            dy: a.dy,
           });
         }
       }
 
       /* discard the fields we don't want to send them */
+      const tick_death_never = state.tick + SPEAR_THROW_SECS*SECOND_IN_TICKS;
       const { tick } = state;
-      const particles = state
-        .particles
-        .map(({ id, x, y, death_tick }) => ({ id, x, y, death_tick }));
+      const spears = state
+        .spears
+        .map(spear => {
+          let { id, x, y, tick_death } = spear;
+          if (spear.passengers)
+            tick_death = tick_death_never;
+          return { id, x, y, tick_death };
+        });
       const players = Object
         .values(state.players)
         .map(({ id, x, y }) => ({ id, x, y }));
+
+      const serialize_wolf_passengers = ps => ps
+        .map(spear => {
+          let { id, x, y, dx, dy } = spear;
+          return { id, x, y, angle: Math.atan2(dy, dx) };
+        });
+      const wolves = Object
+        .values(state.wolves)
+        .map(wolf => {
+          const passengers = serialize_wolf_passengers(wolf.passengers);
+          const { id, x, y } = wolf;
+          return { id, x, y, passengers };
+        });
+
+      for (const spear of state.spears)
+        for (const id in spear.passengers) {
+          const passengers = serialize_wolf_passengers(
+              spear
+                .passengers[id]
+                .passengers
+          );
+          let { x, y } = spear.passengers[id];
+          x += spear.x;
+          y += spear.y;
+          wolves.push({ id, x, y, passengers });
+        }
+
 
       for (let i = 0; i < players.length; i++) {
         const { attack } = Object.values(state.players)[i];
@@ -257,43 +333,66 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
         mailbox.unshift(JSON.stringify([
           "tick",
-          { tick, players, particles, you }
+          { tick, players, spears, wolves, you }
         ]));
       }
     }
 
     state.tick++;
 
-    // for (const sprink of state.sprinklers) {
-    //   /* ten times a second, sprinklers spawn particles */
-    //   if ((state.tick % SECOND_IN_TICKS*5) == 0) {
-    //     state.particles.push({
-    //       id: state.idgen++,
+    state.spears = state.spears.filter(spear => {
+      let lt = inv_lerp(spear.tick_birth, spear.tick_death, state.tick-1);
+      let  t = inv_lerp(spear.tick_birth, spear.tick_death, state.tick);
+      lt = ease_out_quad(lt);
+       t = ease_out_quad( t);
 
-    //       x: sprink.x,
-    //       y: sprink.y,
-    //       death_tick: state.tick + SECOND_IN_TICKS*10,
+      const b4_x = spear.x;
+      const b4_y = spear.y;
+      spear.x += spear.dx * SPEAR_THROW_DIST*(t - lt);
+      spear.y += spear.dy * SPEAR_THROW_DIST*(t - lt);
 
-    //       /* turn the current tick into an angle,
-    //        * and from an angle into a velocity vector. */
-    //       vx: Math.cos(state.tick + sprink.x*10),
-    //       vy: Math.sin(state.tick + sprink.y*10),
-    //     });
-    //   }
-    // }
+      for (const wolf_id in state.wolves) {
+        const wolf = state.wolves[wolf_id];
+        const dist = point_to_line( wolf.x,  wolf.y,
+                                      b4_x,    b4_y,
+                                   spear.x, spear.y);
+        if (dist < TILE_SIZE*0.4) {
+          spear.passengers[wolf_id] = state.wolves[wolf_id];
+          delete state.wolves[wolf_id];
 
-    state.particles = state.particles.filter(part => {
-      /* should be straight forward */
-      part.x += part.vx * 0.003;
-      part.y += part.vy * 0.003;
+          spear.passengers[wolf_id].x -= spear.x;
+          spear.passengers[wolf_id].y -= spear.y;
+        }
+      }
 
       /* wrap around the edges pacman style */
-      if (part.x < 0) part.x = 1 - Math.abs(part.x);
-      if (part.x > 1) part.x = part.x - 1;
-      if (part.y < 0) part.y = 1 - Math.abs(part.y);
-      if (part.y > 1) part.y = part.y - 1;
+      if (spear.x < 0) spear.x = 1 - Math.abs(spear.x);
+      if (spear.x > 1) spear.x = spear.x - 1;
+      if (spear.y < 0) spear.y = 1 - Math.abs(spear.y);
+      if (spear.y > 1) spear.y = spear.y - 1;
 
-      return part.death_tick >= state.tick;
+      if (t >= 1) {
+        for (const id in spear.passengers) {
+          state.wolves[id] = spear.passengers[id];
+          state.wolves[id].x += spear.x;
+          state.wolves[id].y += spear.y;
+        }
+
+        const id = Object.keys(spear.passengers)[0];
+        if (id != undefined) {
+          /* now we ride wolf instead of wolf riding us
+           * ... something something russia? */
+          spear.x -= state.wolves[id].x;
+          spear.y -= state.wolves[id].y;
+          state.wolves[id].passengers.push(spear);
+
+          /* no. */
+          spear.passengers = [];
+        }
+
+        return false;
+      }
+      return true;
     });
 
     dev_cache_state(state);
@@ -383,7 +482,8 @@ if (NODE) {
 const default_state = () => {
   const default_world = () => ({
     players: [],
-    particles: [],
+    spears: [],
+    wolves: [],
     tick: 0
   });
   const default_player = () => ({
@@ -647,16 +747,14 @@ function render(state, canvas, elapsed, dt) {
     ctx.fillStyle = "snow";
     ctx.fillRect(0, 0, 1, 1);
 
-    /* idk, let's have 22 tiles on the screen? */
-    const TILE_SIZE = 1/22;
-
     const TILE_PLAYERS = [
       { body: { w: 1, h: 1, x: 0, y: 8 },
         hand: { w: 1, h: 1, x: 1, y: 8 } },
       { body: { w: 1, h: 1, x: 2, y: 8 },
         hand: { w: 1, h: 1, x: 3, y: 8 } },
     ];
-    const TILE_SPEAR   = { w: 1, h: 1, x: 4, y: 9 };
+    const TILE_SPEAR = { w: 1, h: 1, x:  4, y: 9 };
+    const TILE_WOLF  = { w: 1, h: 1, x: 13, y: 7 };
 
     const draw_tile = (tile, dx, dy, dsize, angle) => {
       const TILE_PIXELS = spritesheet.height/11;
@@ -734,8 +832,11 @@ function render(state, canvas, elapsed, dt) {
       if (attack) {
         const t = attack.prog;
         let fwd = SPEAR_RELEASE_FWD;
-        if (t < 0.8) fwd = lerp(   0, -fwd, t/0.8);
-        else         fwd = lerp(-fwd,  fwd, (t - 0.8)/0.2);
+
+        const wup_t =     SPEAR_WIND_UP_RATIO;
+        const zom_t = 1 - SPEAR_WIND_UP_RATIO;
+        if (t < wup_t) fwd = lerp(   0, -fwd, t/wup_t);
+        else           fwd = lerp(-fwd,  fwd, (t - wup_t)/zom_t);
 
         const forw_x = Math.cos(angle);
         const forw_y = Math.sin(angle);
@@ -756,27 +857,30 @@ function render(state, canvas, elapsed, dt) {
         }
       }
 
-      const jog     = Math.cos(elapsed*0.01    )*0.2*damp;
+      let   jog     = Math.cos(elapsed*0.01    )*0.2*damp;
       const headjog = Math.cos(elapsed*0.01*0.5)*0.2*damp;
-      if (attack == undefined) angle += jog;
+      if (attack != undefined) jog = 0;
+      const head_angle = angle + jog*0.35;
+      angle += jog;
 
       const hand_space = TILE_SIZE * 0.58;
       const ox = hand_space*Math.cos(angle) + d.x*jog*8;
       const oy = hand_space*Math.sin(angle) + d.y*jog*8;
 
-      draw_tile(body, x + d.x*headjog*6,
-                      y + d.y*headjog*6, TILE_SIZE);
+      draw_tile(body, x      + hanim_x*0.1 + d.x*headjog*6,
+                      y      + hanim_y*0.1 + d.y*headjog*6,
+                TILE_SIZE, head_angle);
       draw_tile(hand, x + ox + hanim_x,
-                      y + oy + hanim_y, TILE_SIZE);
+                      y + oy + hanim_y, TILE_SIZE, angle);
       draw_tile(hand, x - ox - hanim_x*0.7,
-                      y - oy - hanim_y*0.7, TILE_SIZE);
+                      y - oy - hanim_y*0.7, TILE_SIZE, Math.PI/2 - angle);
     }
-    for (const { x, y, death_tick, id } of world.particles) {
+    for (const { x, y, tick_death, id } of world.spears) {
       /* canvas treats alphas > 1 the same as 1 */
-      const ttl = death_tick - world.tick;
-      ctx.globalAlpha = ttl / SECOND_IN_TICKS/2;
+      const ttl = tick_death - world.tick;
+      ctx.globalAlpha = ttl / (SECOND_IN_TICKS*SPEAR_FADE_SECS);
 
-      const last_pos = last_world.particles.find(x => x.id == id);
+      const last_pos = last_world.spears.find(x => x.id == id);
       if (!last_pos) continue;
       const angle = Math.atan2(y - last_pos.y, x - last_pos.x);
 
@@ -784,6 +888,29 @@ function render(state, canvas, elapsed, dt) {
 
       /* bad things happen if you forget to reset this */
       ctx.globalAlpha = 1.0;
+    }
+
+    for (const { x, y, passengers } of world.wolves) {
+      const anim_tick = world.tick + 4*x/TILE_SIZE + 4*y/TILE_SIZE;
+      const anim = Math.floor((anim_tick)/17)%2;
+      const flip = anim ?        -1 : 1;
+      const  rot = anim ? Math.PI/2 : 0;
+
+      ctx.save();
+      ctx.translate(x, y);
+      for (const { x, y, angle } of passengers)
+        /* i cannot fucking believe this worked so well (flip*) */
+        draw_tile(TILE_SPEAR, x + flip*TILE_SIZE*0.013,
+                              y + flip*TILE_SIZE*0.013,
+                  TILE_SIZE, angle + Math.PI/2);
+      ctx.restore();
+
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(1, flip);
+      ctx.rotate(rot);
+      draw_tile(TILE_WOLF, 0.0, 0.0, TILE_SIZE);
+      ctx.restore();
     }
 
   }; ctx.restore();
