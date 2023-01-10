@@ -9,7 +9,7 @@ const SPEAR_RELEASE_FWD = 0.04;
 const SPEAR_RELEASE_OUT = 0.027;
 const SPEAR_THROW_DIST = 0.35;
 const SPEAR_THROW_SECS = 0.8;
-const SPEAR_FADE_SECS = SPEAR_THROW_SECS*0.2;
+const SPEAR_FADE_SECS = SPEAR_THROW_SECS*0.4;
 const SPEAR_WIND_UP_RATIO = 0.87;
 
 /* idk, let's have 22 tiles on the screen? */
@@ -18,6 +18,15 @@ const TILE_SIZE = 1/22;
 
 /* vektorr maffz */
 function ease_out_quad(x) { return 1 - (1 - x) * (1 - x); }
+function ease_in_elastic(x) {
+  const c4 = (2 * Math.PI) / 3;
+
+  return x === 0
+    ? 0
+    : x === 1
+    ? 1
+    : -Math.pow(2, 10 * x - 10) * Math.sin((x * 10 - 10.75) * c4);
+}
 function lerp(v0, v1, t) { return (1 - t) * v0 + t * v1; }
 function inv_lerp(min, max, p) { return (((p) - (min)) / ((max) - (min))); }
 function lerp_rads(a, b, t) {
@@ -59,6 +68,12 @@ function point_to_line(   x,    y,
   point_on_line(p, l0_x, l0_y, l1_x, l1_y);
   return mag(p.x - x, p.y - y);
 }
+function pivot(x, y, delta_theta) {
+  return {
+    x: x*Math.cos(delta_theta) - y*Math.sin(delta_theta),
+    y: x*Math.sin(delta_theta) + y*Math.cos(delta_theta)
+  };
+}
 
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
@@ -81,6 +96,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       spears: [],
       wolves: {},
       players: {},
+      /* key: assailant_id,victim_id, value: tick */
+      hit_table: {},
     };
 
     for (let i = 0; i < 10; i++) {
@@ -90,7 +107,19 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       const x = 0.5 + TILE_SIZE*2*Math.cos(t);
       const y = 0.5 + TILE_SIZE*2*Math.sin(t);
 
-      ret.wolves[id] = { x, y, id, passengers: [] };
+      ret.wolves[id] = {
+        x, y, id,
+        hp: 3, hp_max: 3,
+
+        tick_stage_start: 0,
+        tick_stage_end: 0,
+        stage: "dormant", // "dormant" | "turning" | "walking" | "lunging"
+        angle: 0, angle_goal: 0, /* stage == "turning" */
+        walking_dist: 0, /* stage == "walking" */
+
+        passengers: [],
+        waffle_assignment: { player_id: null, slot_index: 0 },
+      };
     }
     return ret;
   };
@@ -188,7 +217,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       if (type == "dev_reset" && BROWSER_HOST) {
         state = null;
-        dev_cache_state(null);
+        localStorage.clear();
         window.location.reload();
       }
     }
@@ -212,6 +241,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
               dx: 0,
               dy: 0,
             },
+            waffle: [],
             id: state.id_gen++
           };
       }
@@ -271,7 +301,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         .spears
         .map(spear => {
           let { id, x, y, tick_death } = spear;
-          if (spear.passengers)
+          if (Object.keys(spear.passengers).length)
             tick_death = tick_death_never;
           return { id, x, y, tick_death };
         });
@@ -279,30 +309,31 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         .values(state.players)
         .map(({ id, x, y }) => ({ id, x, y }));
 
-      const serialize_wolf_passengers = ps => ps
+      const serialize_wolf_passengers = wolf => wolf
+        .passengers
         .map(spear => {
           let { id, x, y, dx, dy } = spear;
+          ({ x    , y     } = pivot( x,  y,  wolf.angle));
+          ({ x: dx, y: dy } = pivot(dx, dy,  wolf.angle));
           return { id, x, y, angle: Math.atan2(dy, dx) };
         });
+      const serialize_wolf = wolf => {
+        const passengers = serialize_wolf_passengers(wolf);
+        const hp = wolf.hp / wolf.hp_max;
+        const { id, x, y, angle } = wolf;
+        return { id, x, y, angle, hp, passengers };
+      };
       const wolves = Object
         .values(state.wolves)
-        .map(wolf => {
-          const passengers = serialize_wolf_passengers(wolf.passengers);
-          const { id, x, y } = wolf;
-          return { id, x, y, passengers };
-        });
+        .map(serialize_wolf);
 
       for (const spear of state.spears)
         for (const id in spear.passengers) {
-          const passengers = serialize_wolf_passengers(
-              spear
-                .passengers[id]
-                .passengers
-          );
-          let { x, y } = spear.passengers[id];
+          const wolf = spear.passengers[id];
+          let { x, y } = wolf;
           x += spear.x;
           y += spear.y;
-          wolves.push({ id, x, y, passengers });
+          wolves.push(serialize_wolf({ ...wolf, x, y }));
         }
 
 
@@ -340,28 +371,84 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
     state.tick++;
 
+    /* each player has a "waffle" around it that tracks places where
+     * enemies can move towards and then attack from. this code assigns
+     * waffle spaces to enemies. */
+    for (const p_id in state.players) {
+      const player = state.players[p_id];
+      for (let i = 0; i < 3; i++) {
+        /* don'needa do nuffin if this is assigned to a living enemy */
+        if (player.waffle[i] && player.waffle[i] in state.wolves)
+          continue;
+
+        /* assign the closest unassigned enemy */
+        let best = { dist: 1e9, wolf_id: null };
+        /* quadratic perf go WEEEE */
+        for (const wolf_id in state.wolves) {
+          const { x, y, waffle_assignment } = state.wolves[wolf_id];
+          if (waffle_assignment.player_id != null) continue;
+
+          const dist = mag(x - player.x, y - player.y);
+          if (dist < best.dist) best = { dist, wolf_id };
+        }
+        if (best.wolf_id != null) {
+          const { waffle_assignment } = state.wolves[best.wolf_id];
+          waffle_assignment.player_id = p_id;
+          waffle_assignment.slot_index = i;
+          player.waffle[i] = best.wolf_id;
+
+          /* breaking here makes alg less "greedy,"
+           * let the other players have a waffle assignment! */
+          break;
+        }
+      }
+    }
+
     state.spears = state.spears.filter(spear => {
       let lt = inv_lerp(spear.tick_birth, spear.tick_death, state.tick-1);
       let  t = inv_lerp(spear.tick_birth, spear.tick_death, state.tick);
       lt = ease_out_quad(lt);
        t = ease_out_quad( t);
 
+      /* passenger coefficient */
+      const p_x = spear => {
+        const count = Object.keys(spear.passengers).length;
+        const ret = 1 - (0.3*count);
+        if (ret < 0) return 0;
+        return ret;
+      };
+
       const b4_x = spear.x;
       const b4_y = spear.y;
-      spear.x += spear.dx * SPEAR_THROW_DIST*(t - lt);
-      spear.y += spear.dy * SPEAR_THROW_DIST*(t - lt);
+      spear.x += spear.dx * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
+      spear.y += spear.dy * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
 
+      /* quadratic perf go WEEEE */
       for (const wolf_id in state.wolves) {
         const wolf = state.wolves[wolf_id];
         const dist = point_to_line( wolf.x,  wolf.y,
                                       b4_x,    b4_y,
                                    spear.x, spear.y);
+        if (dist < TILE_SIZE*0.475) {
+          const key = ''+[wolf_id, spear.id];
+          if (!(key in state.hit_table)) {
+            wolf.hp -= 1;
+            state.hit_table[key] = state.tick;
+            if (wolf.hp <= 0) {
+              delete state.wolves[wolf_id];
+              continue;
+            }
+          }
+        }
         if (dist < TILE_SIZE*0.4) {
           spear.passengers[wolf_id] = state.wolves[wolf_id];
           delete state.wolves[wolf_id];
 
           spear.passengers[wolf_id].x -= spear.x;
           spear.passengers[wolf_id].y -= spear.y;
+
+          const duration = spear.tick_death - spear.tick_birth;
+          spear.tick_death = spear.tick_birth + duration*p_x(spear);
         }
       }
 
@@ -371,29 +458,180 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       if (spear.y < 0) spear.y = 1 - Math.abs(spear.y);
       if (spear.y > 1) spear.y = spear.y - 1;
 
+      t = inv_lerp(spear.tick_birth, spear.tick_death, state.tick);
       if (t >= 1) {
+        /* RELEASE THE WOLVES */
         for (const id in spear.passengers) {
           state.wolves[id] = spear.passengers[id];
           state.wolves[id].x += spear.x;
           state.wolves[id].y += spear.y;
         }
 
+        /* now we ride wolf instead of wolf riding us
+         * ... something something russia? */
         const id = Object.keys(spear.passengers)[0];
         if (id != undefined) {
-          /* now we ride wolf instead of wolf riding us
-           * ... something something russia? */
-          spear.x -= state.wolves[id].x;
-          spear.y -= state.wolves[id].y;
-          state.wolves[id].passengers.push(spear);
-
           /* no. */
           spear.passengers = [];
+
+          const wolf = state.wolves[id];
+          let { x, y, dx, dy } = spear;
+          x -= wolf.x;
+          y -= wolf.y;
+          ({ x    , y     } = pivot( x,  y, -wolf.angle));
+          ({ x: dx, y: dy } = pivot(dx, dy, -wolf.angle));
+          state.wolves[id].passengers.push({ ...spear, x, y, dx, dy });
         }
 
         return false;
       }
       return true;
     });
+
+    for (const wolf_id in state.wolves) {
+      const wolf = state.wolves[wolf_id];
+
+      let lt = inv_lerp(wolf.tick_stage_start,
+                        wolf.tick_stage_end,
+                        state.tick-1);
+      let  t = inv_lerp(wolf.tick_stage_start,
+                        wolf.tick_stage_end,
+                        state.tick);
+
+      /* fast travel to "dormant" stage if the player dies */
+      const p_id = wolf.waffle_assignment.player_id;
+      if (p_id == null) wolf.stage = "dormant";
+
+      const goal_pos = () => {
+        const player = state.players[p_id];
+        const p = (wolf.waffle_assignment.slot_index / 3);
+        const theta = 2*Math.PI * p;
+
+        let { x, y } = player;
+        x += TILE_SIZE*2*Math.cos(theta);
+        y += TILE_SIZE*2*Math.sin(theta);
+
+        if (mag(x - wolf.x, y - wolf.y) < TILE_SIZE*0.5)
+          return { x: player.x, y: player.y };
+
+        return { x, y }
+      };
+
+      const LUNGE_DIST = TILE_SIZE*6;
+      const LUNGE_TICKS = Math.floor(SECOND_IN_TICKS*1.2);
+      const WALK_DIST_MAX = TILE_SIZE*2;
+      const WALK_TICKS     = Math.floor(SECOND_IN_TICKS*0.3);
+      const COOLDOWN_TICKS = Math.floor(SECOND_IN_TICKS*0.7);
+      const TURN_TICKS_MAX = Math.floor(SECOND_IN_TICKS*0.4);
+      switch (wolf.stage) {
+        case "dormant": {
+          if (p_id != null) {
+            const goal = goal_pos();
+            wolf.stage = "turning";
+            const r_a = wolf.angle_stage_start = wolf.angle;
+            const r_b = wolf.angle_stage_end   = Math.atan2(goal.y - wolf.y,
+                                                            goal.x - wolf.x);
+            wolf.tick_stage_start = state.tick;
+
+            const dot = Math.cos(r_a)*Math.cos(r_b) +
+                        Math.sin(r_a)*Math.sin(r_b);
+            /* between 0 and 1 representing how far apart these are */
+            let delta = 0.5 + 0.5*(2 - dot);
+            // if (delta < 0.3) delta = 0.3;
+
+            delta *= TURN_TICKS_MAX;
+            wolf.tick_stage_end   = state.tick + Math.floor(delta);
+          }
+        } break;
+        case "turning": {
+          wolf.angle = lerp_rads(
+            wolf.angle_stage_start,
+            wolf.angle_stage_end,
+            ease_out_quad(t)
+          );
+          if (t < 1) break;
+
+          {
+            let { x, y } = state.players[p_id];
+            const dx = x - wolf.x;
+            const dy = y - wolf.y;
+            const dist = mag(dx, dy);
+
+            const dot = Math.cos(wolf.angle)*(dx/dist) + 
+                        Math.sin(wolf.angle)*(dy/dist); 
+            const angle_good = dot > 0.9;
+            const dist_good = dist < LUNGE_DIST*1.1;
+            if (angle_good && dist_good) {
+              wolf.stage = "lunging";
+              wolf.tick_stage_start = state.tick;
+              wolf.tick_stage_end   = state.tick + LUNGE_TICKS;
+              break;
+            }
+          }
+
+          const goal = goal_pos();
+          const dist = mag(goal.x - wolf.x, goal.y - wolf.y);
+          wolf.stage = "walking";
+
+          let walk_dist = dist;
+          if (walk_dist > WALK_DIST_MAX) walk_dist = WALK_DIST_MAX;
+          wolf.walking_dist = walk_dist;
+          wolf.tick_stage_start = state.tick;
+          wolf.tick_stage_end   = state.tick + WALK_TICKS;
+        } break;
+        case "lunging": {
+          if (lt < 0) break;
+
+          const ATTACK_WIND_UP_RATIO = 0.87;
+          /* maps 0..1 to 0..-0.2, then -0.2..1.0
+           * ATTACK_WIND_UP_RATIO is the inflection point */
+          const t_to_fwd = t => {
+            const  fwd =  1.0;
+            const nfwd = -0.2;
+
+            const wup_t =     ATTACK_WIND_UP_RATIO;
+            const zom_t = 1 - ATTACK_WIND_UP_RATIO;
+            if (t < wup_t) return lerp(   0, nfwd, t/wup_t);
+            else           return lerp(nfwd,  fwd, (t - wup_t)/zom_t);
+          };
+
+          if (t < 0.4*ATTACK_WIND_UP_RATIO) {
+            const { x, y } = state.players[p_id];
+            let dist = rad_distance(
+              wolf.angle,
+              Math.atan2(y - wolf.y,
+                         x - wolf.x)
+            );
+            if (dist > 0.02*Math.PI*2)
+              dist = 0.02*Math.PI*2;
+
+            wolf.angle += dist;
+          }
+           t = t_to_fwd( t);
+          lt = t_to_fwd(lt);
+          wolf.x += (t - lt)*LUNGE_DIST*Math.cos(wolf.angle);
+          wolf.y += (t - lt)*LUNGE_DIST*Math.sin(wolf.angle);
+
+          if (t < 1) break;
+          wolf.stage = "cooldown";
+          wolf.tick_stage_start = state.tick;
+          wolf.tick_stage_end   = state.tick + COOLDOWN_TICKS;
+        } break;
+        case "cooldown": {
+          if (t < 1) break;
+          wolf.stage = "dormant";
+        } break;
+        case "walking": {
+          if (lt < 0) break;
+           t = ease_out_quad( t);
+          lt = ease_out_quad(lt);
+          wolf.x += (t - lt)*wolf.walking_dist*Math.cos(wolf.angle);
+          wolf.y += (t - lt)*wolf.walking_dist*Math.sin(wolf.angle);
+          if (t < 1) break;
+          wolf.stage = "dormant";
+        } break;
+      }
+    }
 
     dev_cache_state(state);
   }
@@ -491,6 +729,9 @@ const default_state = () => {
     id: Math.floor(Math.random() * 99999999999),
     cam: { x: 0, y: 0 },
 
+    last_ts_dash: 0,
+    last_ts_down: { KeyW: 0, KeyS: 0, KeyA: 0, KeyD: 0 },
+
     /* input */
     keysdown: {},
     mousedown: false,
@@ -537,6 +778,10 @@ if (BROWSER_HOST) {
 let host_last, last, host_tick_accumulator = 0;
 if (BROWSER) window.onload = function frame(elapsed) {
   requestAnimationFrame(frame);
+
+  /* -- simulating a bad fps, good for debugging -- */
+  // const bad_fps = 1000/50;
+  // elapsed = Math.floor(elapsed/bad_fps)*bad_fps;
 
   let dt = 0;
   if (last != undefined) dt = elapsed - last;
@@ -665,9 +910,10 @@ function client(state, canvas, elapsed, dt) {
     const [type, payload] = JSON.parse(msg);
 
     if (type == "tick")
-      state.world = payload;
+      if (payload.tick > state.world.tick)
+        state.world = payload;
   }
-  /* some hacks in rendering code rely on monotonically increasing worlds */
+  /* some hacks in rendering code rely on sequential worlds */
   if (state.world != world_b4) state.last_world = world_b4;
 
   /* send messages to server */
@@ -695,6 +941,16 @@ function client(state, canvas, elapsed, dt) {
    * even if you use colemak or dvorak etc. */
   canvas.onkeyup = (state, e) => state.keysdown[e.code] = 0;
   canvas.onkeydown = (state, e) => {
+    if ((e.code in state.last_ts_down) && !state.keysdown[e.code]) {
+      const since_last_down = elapsed - state.last_ts_down[e.code];
+      const since_last_dash = elapsed - state.last_ts_dash;
+      if (since_last_down < 1000*0.25) {
+        console.log("dash!");
+      }
+
+      state.last_ts_down[e.code] = elapsed;
+    }
+
     state.keysdown[e.code] = 1;
 
     if (e.code == 'Escape' && BROWSER_HOST)
@@ -722,17 +978,6 @@ function render(state, canvas, elapsed, dt) {
   /* clear canvas */
   ctx.fillStyle = "white";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  /* lerp camera */
-  {
-    const me = world.players.find(x => x.id == world.you);
-    if (me) {
-      const ideal_cam_x = me.x - 0.5;
-      const ideal_cam_y = me.y - (canvas.height/canvas.width)*0.5;
-      cam.x = lerp(cam.x, ideal_cam_x, 0.08);
-      cam.y = lerp(cam.y, ideal_cam_y, 0.08);
-    }
-  }
 
   ctx.save(); {
     /* make the window wider, it'll zoom.
@@ -802,7 +1047,7 @@ function render(state, canvas, elapsed, dt) {
 
       const last_pos = last_world.players.find(x => x.id == id);
       if (!last_pos) continue;
-      const d = { x: x - last_pos.x, y: y - last_pos.y };
+      const d = norm({ x: x - last_pos.x, y: y - last_pos.y });
 
       if (last_pos.angle == undefined) last_pos.angle = 0;
       if (last_pos.damp  == undefined) last_pos.damp  = 0;
@@ -863,6 +1108,9 @@ function render(state, canvas, elapsed, dt) {
       const head_angle = angle + jog*0.35;
       angle += jog;
 
+      d.x *= 0.003;
+      d.y *= 0.003;
+
       const hand_space = TILE_SIZE * 0.58;
       const ox = hand_space*Math.cos(angle) + d.x*jog*8;
       const oy = hand_space*Math.sin(angle) + d.y*jog*8;
@@ -890,7 +1138,9 @@ function render(state, canvas, elapsed, dt) {
       ctx.globalAlpha = 1.0;
     }
 
-    for (const { x, y, passengers } of world.wolves) {
+    for (const wolf of world.wolves) {
+      const { x, y, angle, passengers, hp } = wolf;
+
       const anim_tick = world.tick + 4*x/TILE_SIZE + 4*y/TILE_SIZE;
       const anim = Math.floor((anim_tick)/17)%2;
       const flip = anim ?        -1 : 1;
@@ -900,18 +1150,39 @@ function render(state, canvas, elapsed, dt) {
       ctx.translate(x, y);
       for (const { x, y, angle } of passengers)
         /* i cannot fucking believe this worked so well (flip*) */
-        draw_tile(TILE_SPEAR, x + flip*TILE_SIZE*0.013,
-                              y + flip*TILE_SIZE*0.013,
+        draw_tile(TILE_SPEAR, x + Math.cos(wolf.angle)*flip*TILE_SIZE*0.013,
+                              y + Math.sin(wolf.angle)*flip*TILE_SIZE*0.013,
                   TILE_SIZE, angle + Math.PI/2);
       ctx.restore();
 
+      const min = 0.1 + 0.9*hp;
+      const range = 0.5*0.9*hp;
+      const period = 0.008 * (2 - hp);
+      const t = 0.5 + 0.5*Math.cos(elapsed*period);
+      ctx.globalAlpha = lerp(min, min+range, t);
       ctx.save();
       ctx.translate(x, y);
+      ctx.rotate(angle - Math.PI*(3/4));
       ctx.scale(1, flip);
       ctx.rotate(rot);
       draw_tile(TILE_WOLF, 0.0, 0.0, TILE_SIZE);
       ctx.restore();
+      ctx.globalAlpha = 1;
     }
 
   }; ctx.restore();
+
+  /* lerp camera
+   * do not do this at the beginning of the frame! */
+  {
+    const me = world.players.find(x => x.id == world.you);
+    if (me) {
+      const ideal_cam_x = me.x - 0.5;
+      const ideal_cam_y = me.y - (canvas.height/canvas.width)*0.5;
+
+      const t = 1 - Math.pow(1 - 0.08, 60*dt/1000);
+      cam.x = lerp(cam.x, ideal_cam_x, t);
+      cam.y = lerp(cam.y, ideal_cam_y, t);
+    }
+  }
 }
