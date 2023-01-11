@@ -1,8 +1,12 @@
 // vim: sw=2 ts=2 expandtab smartindent ft=javascript
-const SPLITSCREEN = true;
+const SPLITSCREEN = false;
 const BROWSER_HOST = true;
 const BROWSER = (typeof window) == "object";
 const NODE = !BROWSER;
+
+/* idk, let's have 22 tiles on the screen? */
+/* note: size of players, entities multiplied by this */
+const TILE_SIZE = 1/22;
 
 const SECOND_IN_TICKS = 60; 
 const SPEAR_RELEASE_FWD = 0.04;
@@ -11,10 +15,8 @@ const SPEAR_THROW_DIST = 0.35;
 const SPEAR_THROW_SECS = 0.8;
 const SPEAR_FADE_SECS = SPEAR_THROW_SECS*0.4;
 const SPEAR_WIND_UP_RATIO = 0.87;
-
-/* idk, let's have 22 tiles on the screen? */
-/* note: size of players, entities is expressed in terms of tile size */
-const TILE_SIZE = 1/22;
+const DASH_TICKS = Math.floor(SECOND_IN_TICKS*0.35);
+const DASH_DIST  = TILE_SIZE*2.4;
 
 /* vektorr maffz */
 function ease_out_quad(x) { return 1 - (1 - x) * (1 - x); }
@@ -75,8 +77,196 @@ function pivot(x, y, delta_theta) {
   };
 }
 
+/* hastily ported from
+ * https://github.com/nothings/stb/blob/master/stb_perlin.h */
+function noise3(
+  x,      y,      z,
+  x_wrap, y_wrap, z_wrap,
+  seed
+) {
+  // not same permutation table as Perlin's reference to avoid copyright issues;
+  // Perlin's table can be found at http://mrl.nyu.edu/~perlin/noise/
+  // static unsigned char stb__perlin_randtab[512] =
+  const stb__perlin_randtab = [
+     23, 125, 161, 52, 103, 117, 70, 37, 247, 101, 203, 169, 124, 126, 44, 123,
+     152, 238, 145, 45, 171, 114, 253, 10, 192, 136, 4, 157, 249, 30, 35, 72,
+     175, 63, 77, 90, 181, 16, 96, 111, 133, 104, 75, 162, 93, 56, 66, 240,
+     8, 50, 84, 229, 49, 210, 173, 239, 141, 1, 87, 18, 2, 198, 143, 57,
+     225, 160, 58, 217, 168, 206, 245, 204, 199, 6, 73, 60, 20, 230, 211, 233,
+     94, 200, 88, 9, 74, 155, 33, 15, 219, 130, 226, 202, 83, 236, 42, 172,
+     165, 218, 55, 222, 46, 107, 98, 154, 109, 67, 196, 178, 127, 158, 13, 243,
+     65, 79, 166, 248, 25, 224, 115, 80, 68, 51, 184, 128, 232, 208, 151, 122,
+     26, 212, 105, 43, 179, 213, 235, 148, 146, 89, 14, 195, 28, 78, 112, 76,
+     250, 47, 24, 251, 140, 108, 186, 190, 228, 170, 183, 139, 39, 188, 244, 246,
+     132, 48, 119, 144, 180, 138, 134, 193, 82, 182, 120, 121, 86, 220, 209, 3,
+     91, 241, 149, 85, 205, 150, 113, 216, 31, 100, 41, 164, 177, 214, 153, 231,
+     38, 71, 185, 174, 97, 201, 29, 95, 7, 92, 54, 254, 191, 118, 34, 221,
+     131, 11, 163, 99, 234, 81, 227, 147, 156, 176, 17, 142, 69, 12, 110, 62,
+     27, 255, 0, 194, 59, 116, 242, 252, 19, 21, 187, 53, 207, 129, 64, 135,
+     61, 40, 167, 237, 102, 223, 106, 159, 197, 189, 215, 137, 36, 32, 22, 5,
+
+     // and a second copy so we don't need an extra mask or static initializer
+     23, 125, 161, 52, 103, 117, 70, 37, 247, 101, 203, 169, 124, 126, 44, 123,
+     152, 238, 145, 45, 171, 114, 253, 10, 192, 136, 4, 157, 249, 30, 35, 72,
+     175, 63, 77, 90, 181, 16, 96, 111, 133, 104, 75, 162, 93, 56, 66, 240,
+     8, 50, 84, 229, 49, 210, 173, 239, 141, 1, 87, 18, 2, 198, 143, 57,
+     225, 160, 58, 217, 168, 206, 245, 204, 199, 6, 73, 60, 20, 230, 211, 233,
+     94, 200, 88, 9, 74, 155, 33, 15, 219, 130, 226, 202, 83, 236, 42, 172,
+     165, 218, 55, 222, 46, 107, 98, 154, 109, 67, 196, 178, 127, 158, 13, 243,
+     65, 79, 166, 248, 25, 224, 115, 80, 68, 51, 184, 128, 232, 208, 151, 122,
+     26, 212, 105, 43, 179, 213, 235, 148, 146, 89, 14, 195, 28, 78, 112, 76,
+     250, 47, 24, 251, 140, 108, 186, 190, 228, 170, 183, 139, 39, 188, 244, 246,
+     132, 48, 119, 144, 180, 138, 134, 193, 82, 182, 120, 121, 86, 220, 209, 3,
+     91, 241, 149, 85, 205, 150, 113, 216, 31, 100, 41, 164, 177, 214, 153, 231,
+     38, 71, 185, 174, 97, 201, 29, 95, 7, 92, 54, 254, 191, 118, 34, 221,
+     131, 11, 163, 99, 234, 81, 227, 147, 156, 176, 17, 142, 69, 12, 110, 62,
+     27, 255, 0, 194, 59, 116, 242, 252, 19, 21, 187, 53, 207, 129, 64, 135,
+     61, 40, 167, 237, 102, 223, 106, 159, 197, 189, 215, 137, 36, 32, 22, 5,
+  ];
+
+
+  // perlin's gradient has 12 cases so some get used 1/16th of the time
+  // and some 2/16ths. We reduce bias by changing those fractions
+  // to 5/64ths and 6/64ths
+
+  // this array is designed to match the previous implementation
+  // of gradient hash: indices[stb__perlin_randtab[i]&63]
+  // static unsigned char stb__perlin_randtab_grad_idx[512] =
+  const stb__perlin_randtab_grad_idx = [
+      7, 9, 5, 0, 11, 1, 6, 9, 3, 9, 11, 1, 8, 10, 4, 7,
+      8, 6, 1, 5, 3, 10, 9, 10, 0, 8, 4, 1, 5, 2, 7, 8,
+      7, 11, 9, 10, 1, 0, 4, 7, 5, 0, 11, 6, 1, 4, 2, 8,
+      8, 10, 4, 9, 9, 2, 5, 7, 9, 1, 7, 2, 2, 6, 11, 5,
+      5, 4, 6, 9, 0, 1, 1, 0, 7, 6, 9, 8, 4, 10, 3, 1,
+      2, 8, 8, 9, 10, 11, 5, 11, 11, 2, 6, 10, 3, 4, 2, 4,
+      9, 10, 3, 2, 6, 3, 6, 10, 5, 3, 4, 10, 11, 2, 9, 11,
+      1, 11, 10, 4, 9, 4, 11, 0, 4, 11, 4, 0, 0, 0, 7, 6,
+      10, 4, 1, 3, 11, 5, 3, 4, 2, 9, 1, 3, 0, 1, 8, 0,
+      6, 7, 8, 7, 0, 4, 6, 10, 8, 2, 3, 11, 11, 8, 0, 2,
+      4, 8, 3, 0, 0, 10, 6, 1, 2, 2, 4, 5, 6, 0, 1, 3,
+      11, 9, 5, 5, 9, 6, 9, 8, 3, 8, 1, 8, 9, 6, 9, 11,
+      10, 7, 5, 6, 5, 9, 1, 3, 7, 0, 2, 10, 11, 2, 6, 1,
+      3, 11, 7, 7, 2, 1, 7, 3, 0, 8, 1, 1, 5, 0, 6, 10,
+      11, 11, 0, 2, 7, 0, 10, 8, 3, 5, 7, 1, 11, 1, 0, 7,
+      9, 0, 11, 5, 10, 3, 2, 3, 5, 9, 7, 9, 8, 4, 6, 5,
+
+      // and a second copy so we don't need an extra mask or static initializer
+      7, 9, 5, 0, 11, 1, 6, 9, 3, 9, 11, 1, 8, 10, 4, 7,
+      8, 6, 1, 5, 3, 10, 9, 10, 0, 8, 4, 1, 5, 2, 7, 8,
+      7, 11, 9, 10, 1, 0, 4, 7, 5, 0, 11, 6, 1, 4, 2, 8,
+      8, 10, 4, 9, 9, 2, 5, 7, 9, 1, 7, 2, 2, 6, 11, 5,
+      5, 4, 6, 9, 0, 1, 1, 0, 7, 6, 9, 8, 4, 10, 3, 1,
+      2, 8, 8, 9, 10, 11, 5, 11, 11, 2, 6, 10, 3, 4, 2, 4,
+      9, 10, 3, 2, 6, 3, 6, 10, 5, 3, 4, 10, 11, 2, 9, 11,
+      1, 11, 10, 4, 9, 4, 11, 0, 4, 11, 4, 0, 0, 0, 7, 6,
+      10, 4, 1, 3, 11, 5, 3, 4, 2, 9, 1, 3, 0, 1, 8, 0,
+      6, 7, 8, 7, 0, 4, 6, 10, 8, 2, 3, 11, 11, 8, 0, 2,
+      4, 8, 3, 0, 0, 10, 6, 1, 2, 2, 4, 5, 6, 0, 1, 3,
+      11, 9, 5, 5, 9, 6, 9, 8, 3, 8, 1, 8, 9, 6, 9, 11,
+      10, 7, 5, 6, 5, 9, 1, 3, 7, 0, 2, 10, 11, 2, 6, 1,
+      3, 11, 7, 7, 2, 1, 7, 3, 0, 8, 1, 1, 5, 0, 6, 10,
+      11, 11, 0, 2, 7, 0, 10, 8, 3, 5, 7, 1, 11, 1, 0, 7,
+      9, 0, 11, 5, 10, 3, 2, 3, 5, 9, 7, 9, 8, 4, 6, 5,
+  ];
+
+  function stb__perlin_lerp(a, b, t) { return a + (b-a) * t; }
+
+  const stb__perlin_fastfloor = Math.floor;
+
+  // different grad function from Perlin's, but easy to modify to match reference
+  function stb__perlin_grad(grad_idx, x, y, z) {
+    // static float basis[12][4] =
+    const basis = [
+      [  1, 1, 0 ],
+      [ -1, 1, 0 ],
+      [  1,-1, 0 ],
+      [ -1,-1, 0 ],
+      [  1, 0, 1 ],
+      [ -1, 0, 1 ],
+      [  1, 0,-1 ],
+      [ -1, 0,-1 ],
+      [  0, 1, 1 ],
+      [  0,-1, 1 ],
+      [  0, 1,-1 ],
+      [  0,-1,-1 ],
+    ];
+
+    const grad = basis[grad_idx];
+    return grad[0]*x + grad[1]*y + grad[2]*z;
+  }
+
+  let u,v,w;
+  let n000,n001,n010,n011,n100,n101,n110,n111;
+  let n00,n01,n10,n11;
+  let n0,n1;
+
+  let x_mask = (x_wrap-1) & 255;
+  let y_mask = (y_wrap-1) & 255;
+  let z_mask = (z_wrap-1) & 255;
+  let px = stb__perlin_fastfloor(x);
+  let py = stb__perlin_fastfloor(y);
+  let pz = stb__perlin_fastfloor(z);
+  let x0 = px & x_mask, x1 = (px+1) & x_mask;
+  let y0 = py & y_mask, y1 = (py+1) & y_mask;
+  let z0 = pz & z_mask, z1 = (pz+1) & z_mask;
+  let r0,r1, r00,r01,r10,r11;
+
+  const stb__perlin_ease = a => (((a*6-15)*a + 10) * a * a * a);
+
+  x -= px; u = stb__perlin_ease(x);
+  y -= py; v = stb__perlin_ease(y);
+  z -= pz; w = stb__perlin_ease(z);
+
+  r0 = stb__perlin_randtab[x0+seed];
+  r1 = stb__perlin_randtab[x1+seed];
+
+  r00 = stb__perlin_randtab[r0+y0];
+  r01 = stb__perlin_randtab[r0+y1];
+  r10 = stb__perlin_randtab[r1+y0];
+  r11 = stb__perlin_randtab[r1+y1];
+
+  n000 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r00+z0], x  , y  , z   );
+  n001 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r00+z1], x  , y  , z-1 );
+  n010 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r01+z0], x  , y-1, z   );
+  n011 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r01+z1], x  , y-1, z-1 );
+  n100 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r10+z0], x-1, y  , z   );
+  n101 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r10+z1], x-1, y  , z-1 );
+  n110 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r11+z0], x-1, y-1, z   );
+  n111 = stb__perlin_grad(stb__perlin_randtab_grad_idx[r11+z1], x-1, y-1, z-1 );
+
+  n00 = stb__perlin_lerp(n000,n001,w);
+  n01 = stb__perlin_lerp(n010,n011,w);
+  n10 = stb__perlin_lerp(n100,n101,w);
+  n11 = stb__perlin_lerp(n110,n111,w);
+
+  n0 = stb__perlin_lerp(n00,n01,v);
+  n1 = stb__perlin_lerp(n10,n11,v);
+
+  return stb__perlin_lerp(n0,n1,u);
+}
+
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
+
+  const spawn_wolf = (state, x=Math.random(), y=Math.random()) => {
+    const id = state.id_gen++;
+
+    state.wolves[id] = {
+      x, y, id,
+      hp: 3, hp_max: 3,
+
+      tick_stage_start: 0,
+      tick_stage_end: 0,
+      stage: "dormant", // "dormant" | "turning" | "walking" | "lunging"
+      angle: 0, angle_goal: 0, /* stage == "turning" */
+      walking_dist: 0, /* stage == "walking" */
+
+      passengers: [],
+      waffle_assignment: { player_id: null, slot_index: 0 },
+    };
+
+    return id;
+  };
 
   const default_state = () => {
     const ret = {
@@ -88,6 +278,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
        * in short: client/mailbox = networking, player = ent in game */
       mailbox: [],
       client_mailboxes: {},
+      client_dead: {},
 
       /* ids are important so clients can track entities across frames,
        * allowing them to smooth out their movement across sparse updates
@@ -100,27 +291,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       hit_table: {},
     };
 
-    for (let i = 0; i < 10; i++) {
-      const id = ret.id_gen++;
+    spawn_wolf(ret);
 
-      const t = (i/10) * Math.PI*2;
-      const x = 0.5 + TILE_SIZE*2*Math.cos(t);
-      const y = 0.5 + TILE_SIZE*2*Math.sin(t);
-
-      ret.wolves[id] = {
-        x, y, id,
-        hp: 3, hp_max: 3,
-
-        tick_stage_start: 0,
-        tick_stage_end: 0,
-        stage: "dormant", // "dormant" | "turning" | "walking" | "lunging"
-        angle: 0, angle_goal: 0, /* stage == "turning" */
-        walking_dist: 0, /* stage == "walking" */
-
-        passengers: [],
-        waffle_assignment: { player_id: null, slot_index: 0 },
-      };
-    }
     return ret;
   };
 
@@ -215,6 +387,22 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         player.vy = y;
       }
 
+      if (type == "dash") {
+        /* uh you can't do this before you're spawned in */
+        if (!(sender_id in state.players)) continue;
+        const player = state.players[sender_id];
+
+        const { x, y } = norm(payload);
+
+        if (state.tick < player.dash.tick_end) continue;
+        player.dash = {
+          tick_start: state.tick,
+          tick_end  : state.tick + DASH_TICKS,
+          dx: x,
+          dy: y,
+        };
+      }
+
       if (type == "dev_reset" && BROWSER_HOST) {
         state = null;
         localStorage.clear();
@@ -227,12 +415,15 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
        * (if we ever have a spectator mode or char creation screen,
        *  this won't make sense anymore) */
       for (const p_id in state.client_mailboxes) {
+        if (state.client_dead[p_id]) continue;
+
         if (!(p_id in state.players))
           state.players[p_id] = {
             x: 0.5,
             y: 0.5,
             vx: 0.0,
             vy: 0.0,
+            dash: { dx: 0, dy: 0, tick_start: 0, tick_end: 0 },
             attack: {
               tick_msg_earliest: 0,
               tick_msg_latest: 0,
@@ -254,6 +445,16 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         p.x += p.vx * 0.003;
         p.y += p.vy * 0.003;
 
+        {
+          let lt = inv_lerp(p.dash.tick_start, p.dash.tick_end, state.tick-1);
+          let  t = inv_lerp(p.dash.tick_start, p.dash.tick_end, state.tick);
+          if (t > 0 && t < 1 && lt > 0) {
+             t = ease_out_quad( t);
+            lt = ease_out_quad(lt);
+            p.x += (t - lt)*DASH_DIST*p.dash.dx;
+            p.y += (t - lt)*DASH_DIST*p.dash.dy;
+          }
+        }
 
         if (p.attack.streak == 'dormant') continue;
         if (p.attack.streak == 'cooldown') {
@@ -360,7 +561,9 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         /* maybe confusing, but we're going from
          * "id of client with mailbox" to
          * "id of entity in game they control" */
-        const you = state.players[p_id].id;
+        let you = -1;
+        if (p_id in state.players)
+          you = state.players[p_id].id;
 
         mailbox.unshift(JSON.stringify([
           "tick",
@@ -429,12 +632,13 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         const dist = point_to_line( wolf.x,  wolf.y,
                                       b4_x,    b4_y,
                                    spear.x, spear.y);
-        if (dist < TILE_SIZE*0.475) {
+        if (dist < TILE_SIZE*0.435) {
           const key = ''+[wolf_id, spear.id];
           if (!(key in state.hit_table)) {
             wolf.hp -= 1;
             state.hit_table[key] = state.tick;
             if (wolf.hp <= 0) {
+              spawn_wolf(state); spawn_wolf(state);
               delete state.wolves[wolf_id];
               continue;
             }
@@ -465,6 +669,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           state.wolves[id] = spear.passengers[id];
           state.wolves[id].x += spear.x;
           state.wolves[id].y += spear.y;
+          state.wolves[id].stage = 'dormant';
         }
 
         /* now we ride wolf instead of wolf riding us
@@ -500,7 +705,9 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       /* fast travel to "dormant" stage if the player dies */
       const p_id = wolf.waffle_assignment.player_id;
-      if (p_id == null) wolf.stage = "dormant";
+      const p_id_valid = !state.client_dead[p_id] && p_id in state.players;
+      if (!p_id_valid)
+        wolf.stage = "dormant";
 
       const goal_pos = () => {
         const player = state.players[p_id];
@@ -521,26 +728,26 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       const LUNGE_TICKS = Math.floor(SECOND_IN_TICKS*1.2);
       const WALK_DIST_MAX = TILE_SIZE*2;
       const WALK_TICKS     = Math.floor(SECOND_IN_TICKS*0.3);
-      const COOLDOWN_TICKS = Math.floor(SECOND_IN_TICKS*0.7);
+      const COOLDOWN_TICKS = Math.floor(SECOND_IN_TICKS*1.4);
       const TURN_TICKS_MAX = Math.floor(SECOND_IN_TICKS*0.4);
       switch (wolf.stage) {
         case "dormant": {
-          if (p_id != null) {
+          if (p_id_valid) {
             const goal = goal_pos();
             wolf.stage = "turning";
             const r_a = wolf.angle_stage_start = wolf.angle;
             const r_b = wolf.angle_stage_end   = Math.atan2(goal.y - wolf.y,
                                                             goal.x - wolf.x);
-            wolf.tick_stage_start = state.tick;
 
             const dot = Math.cos(r_a)*Math.cos(r_b) +
                         Math.sin(r_a)*Math.sin(r_b);
             /* between 0 and 1 representing how far apart these are */
             let delta = 0.5 + 0.5*(2 - dot);
             // if (delta < 0.3) delta = 0.3;
-
             delta *= TURN_TICKS_MAX;
+
             wolf.tick_stage_end   = state.tick + Math.floor(delta);
+            wolf.tick_stage_start = state.tick;
           }
         } break;
         case "turning": {
@@ -609,8 +816,25 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           }
            t = t_to_fwd( t);
           lt = t_to_fwd(lt);
+          const b4_x = wolf.x;
+          const b4_y = wolf.y;
           wolf.x += (t - lt)*LUNGE_DIST*Math.cos(wolf.angle);
           wolf.y += (t - lt)*LUNGE_DIST*Math.sin(wolf.angle);
+
+          /* quadratic perf go WEEEE */
+          for (const p_id in state.players) {
+            const plyr = state.players[p_id];
+
+            const dist = point_to_line(plyr.x, plyr.y,
+                                         b4_x,   b4_y,
+                                       wolf.x, wolf.y);
+            if (dist < TILE_SIZE*0.435) {
+              plyr.hp -= 1;
+              delete state.players[p_id];
+              state.client_dead[p_id] = true;
+              continue;
+            }
+          }
 
           if (t < 1) break;
           wolf.stage = "cooldown";
@@ -816,6 +1040,18 @@ if (BROWSER) window.onload = function frame(elapsed) {
     );
     dev_cache_state(state);
   }
+  window.onkeydown = e => {
+    const state = client_state();
+    if (state.last_clicked == 'p1') p1.onkeydown(state.p1, e);
+    if (state.last_clicked == 'p2') p2.onkeydown(state.p2, e);
+    dev_cache_state(state);
+  }
+  window.onkeyup = e => {
+    const state = client_state();
+    if (state.last_clicked == 'p1') p1.onkeyup(state.p1, e);
+    if (state.last_clicked == 'p2') p2.onkeyup(state.p2, e);
+    dev_cache_state(state);
+  }
 
   const state = client_state();
   if (SPLITSCREEN) {
@@ -832,23 +1068,11 @@ if (BROWSER) window.onload = function frame(elapsed) {
     client(state.p1, p1, elapsed, dt);
     client(state.p2, p2, elapsed, dt);
 
-    window.onkeydown = e => {
-      const state = client_state();
-      if (state.last_clicked == 'p1') p1.onkeydown(state.p1, e);
-      if (state.last_clicked == 'p2') p2.onkeydown(state.p2, e);
-      dev_cache_state(state);
-    }
-    window.onkeyup = e => {
-      const state = client_state();
-      if (state.last_clicked == 'p1') p1.onkeyup(state.p1, e);
-      if (state.last_clicked == 'p2') p2.onkeyup(state.p2, e);
-      dev_cache_state(state);
-    }
   } else {
     const p1 = document.getElementById("p1");
     p1.width  = window.innerWidth;
     p1.height = window.innerHeight;
-    client(p1, elapsed, state.p1);
+    client(state.p1, p1, elapsed, dt);
   }
   dev_cache_state(state);
 
@@ -917,8 +1141,8 @@ function client(state, canvas, elapsed, dt) {
   if (state.world != world_b4) state.last_world = world_b4;
 
   /* send messages to server */
-  if (state.mousedown) {
-    const player = state.world.players.find(x => x.id == state.world.you);
+  const player = state.world.players.find(x => x.id == state.world.you);
+  if (player && state.mousedown) {
     const ideal_dir = Math.atan2(state.mousepos.y - player.y,
                                  state.mousepos.x - player.x);
     const distance = rad_distance(state.attack_dir, ideal_dir);
@@ -942,10 +1166,16 @@ function client(state, canvas, elapsed, dt) {
   canvas.onkeyup = (state, e) => state.keysdown[e.code] = 0;
   canvas.onkeydown = (state, e) => {
     if ((e.code in state.last_ts_down) && !state.keysdown[e.code]) {
-      const since_last_down = elapsed - state.last_ts_down[e.code];
-      const since_last_dash = elapsed - state.last_ts_dash;
-      if (since_last_down < 1000*0.25) {
-        console.log("dash!");
+      const since_last_down = (elapsed - state.last_ts_down[e.code])/1000;
+      const since_last_dash = (elapsed - state.last_ts_dash        )/1000;
+      if (since_last_down < 0.35 && since_last_dash > 1.0) {
+        state.last_ts_dash = elapsed;
+        const move = { x: 0, y: 0 };
+             if (e.code == 'KeyW') move.y -= 1;
+        else if (e.code == 'KeyS') move.y += 1;
+        else if (e.code == 'KeyA') move.x -= 1;
+        else if (e.code == 'KeyD') move.x += 1;
+        send_host(id, JSON.stringify(["dash", norm(move)]));
       }
 
       state.last_ts_down[e.code] = elapsed;
@@ -969,6 +1199,7 @@ function client(state, canvas, elapsed, dt) {
 
 const spritesheet = new Image();
 spritesheet.src = "art.png";
+const TILE_PIXELS = spritesheet.height/11;
 function render(state, canvas, elapsed, dt) {
   const { world, last_world, cam } = state;
 
@@ -976,7 +1207,7 @@ function render(state, canvas, elapsed, dt) {
   const ctx = canvas.getContext("2d");
 
   /* clear canvas */
-  ctx.fillStyle = "white";
+  ctx.fillStyle = `hsl(199, 50%, 58%)`;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.save(); {
@@ -988,10 +1219,6 @@ function render(state, canvas, elapsed, dt) {
 
     ctx.translate(-cam.x, -cam.y);
 
-    /* fill in background */
-    ctx.fillStyle = "snow";
-    ctx.fillRect(0, 0, 1, 1);
-
     const TILE_PLAYERS = [
       { body: { w: 1, h: 1, x: 0, y: 8 },
         hand: { w: 1, h: 1, x: 1, y: 8 } },
@@ -1001,9 +1228,11 @@ function render(state, canvas, elapsed, dt) {
     const TILE_SPEAR = { w: 1, h: 1, x:  4, y: 9 };
     const TILE_WOLF  = { w: 1, h: 1, x: 13, y: 7 };
 
-    const draw_tile = (tile, dx, dy, dsize, angle) => {
-      const TILE_PIXELS = spritesheet.height/11;
+    /* fill in background */
+    const bg = make_bg(canvas.width);
+    ctx.drawImage(bg, 0, 0, bg.width, bg.height, 0, 0, 1, 1);
 
+    const draw_tile = (tile, dx, dy, dsize, angle) => {
       if (angle != undefined) {
         ctx.save();
         ctx.translate(dx, dy);
@@ -1185,4 +1414,79 @@ function render(state, canvas, elapsed, dt) {
       cam.y = lerp(cam.y, ideal_cam_y, t);
     }
   }
+}
+
+let cached_bg;
+function make_bg(width) {
+  if (cached_bg && cached_bg.width == width)
+    return cached_bg;
+
+  const bg = cached_bg = document.createElement('canvas');
+  bg.width = width;
+  bg.height = width;
+
+  const ctx = bg.getContext("2d");
+  ctx.scale(bg.width, bg.width);
+
+  const hsl_s = 50;
+  const hsl_l = 58;
+  ctx.fillStyle = `hsl(199, ${hsl_s}%, ${hsl_l}%)`;
+  ctx.fillRect(0, 0, 1, 1);
+
+  const TILE_GRASS = { w: 1, h: 1, x: 0, y: 7 };
+  const TILE_WATER = { w: 1, h: 1, x: 7, y: 0 };
+
+  /* background */
+  for (let x = 0; x < 1.0/TILE_SIZE; x++)
+    for (let y = 0; y < 1.0/TILE_SIZE; y++) {
+      const dx = x*TILE_SIZE;
+      const dy = y*TILE_SIZE;
+
+      let noise = noise3(dx, dy, 0, 0, 0, 0, 4);
+      noise = 0.5 + 0.5*noise;
+      const circ = (mag(dx - 0.5, dy - 0.5)/mag(0.5, 0.5));
+      if (noise*circ > 0.17) continue;
+
+      // const sat = hsl_s - Math.floor(noise*40 /5)*5;
+      const sat = hsl_s;
+      const hue = 104 - Math.floor(noise*50 /3)*3;
+      ctx.fillStyle = `hsl(${hue}, ${sat}%, ${hsl_l}%)`;
+      ctx.beginPath();
+      ctx.arc(dx+TILE_SIZE/2, dy+TILE_SIZE/2, TILE_SIZE, 0, 2*Math.PI);
+      ctx.fill();
+    }
+
+  for (let x = 0; x < 1.0/TILE_SIZE; x++)
+    for (let y = 0; y < 1.0/TILE_SIZE; y++) {
+      const dx = x*TILE_SIZE;
+      const dy = y*TILE_SIZE;
+
+      let noise = noise3(dx, dy, 0, 0, 0, 0, 4);
+      noise = 0.5 + 0.5*noise;
+      const circ = (mag(dx - 0.5, dy - 0.5)/mag(0.5, 0.5));
+      const tile = (noise*circ > 0.17) ? TILE_GRASS : TILE_WATER;
+
+      ctx.globalAlpha = 0.1;
+      if (noise*circ <= 0.17)
+        ctx.globalAlpha += 0.14 * (1 - ((noise*circ) / 0.17));
+      if (noise*circ  > 0.17)
+        ctx.globalAlpha -= 0.1 * ((noise*circ) / (1 - 0.17));
+
+      ctx.drawImage(
+        spritesheet,
+
+        /* source x & y on spritesheet */
+        tile.x*TILE_PIXELS, tile.y*TILE_PIXELS,
+        /* source width and height on spritesheet */
+        tile.w*TILE_PIXELS, tile.h*TILE_PIXELS,
+
+        /* destination x & y in world */
+        dx, dy,
+        /* destination width and height in world */
+        TILE_SIZE, TILE_SIZE
+      );
+    }
+  ctx.globalAlpha = 1;
+
+  return bg;
 }
