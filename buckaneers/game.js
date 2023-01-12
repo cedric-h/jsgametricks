@@ -1574,12 +1574,16 @@ function render(state, canvas, elapsed, dt) {
   }
 }
 
-function w_grid_fill(w_grid, x, y, num, opts) {
-  opts ??= { x: 0, y: 0, w: HARDS_PER_TILE, h: HARDS_PER_TILE, edge: 1 };
+function w_grid_fill(w_grid, x, y, num, opts={}) {
+  const o_x = opts.x ?? 0;
+  const o_y = opts.y ?? 0;
+  const o_w = opts.w ?? HARDS_PER_TILE;
+  const o_h = opts.h ?? HARDS_PER_TILE;
+
   const hx = HARDS_PER_TILE*x;
   const hy = HARDS_PER_TILE*y;
-  for (let dx = opts.x; dx < HARDS_PER_TILE; dx++) {
-    for (let dy = opts.y; dy < HARDS_PER_TILE; dy++)
+  for (let dx = o_x; dx < o_x+o_w; dx++) {
+    for (let dy = o_y; dy < o_y+o_h; dy++)
       w_grid[(hy+dy)*HARD_COUNT + (hx+dx)] = num;
   }
 }
@@ -1635,16 +1639,25 @@ function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
         }
       }
 
+      let xpad = +((x+y)%4 == 0);
+      let ypad = +((x+y)%5 == 0);
+      if (render_fg || render_bg) {
+        xpad = (xpad ? 1 : -1) * (TILE_SIZE/3 * 0.4);
+        ypad = (ypad ? 1 : -1) * (TILE_SIZE/3 * 0.4);
+      }
+      const fill = { x: xpad, w: 2,
+                     y: ypad, h: 2, };
+
       if (gval == GRABGRID_BARREL) {
-        if (render_fg) draw_tile(TILE_BARREL, dx+pad, dy+pad, 1);
+        if (render_fg) draw_tile(TILE_BARREL, dx+xpad, dy+ypad, 1);
         // if (walkgrid) w_grid_fill_no_edge(w_grid, x, y, 0);
-        if (walkgrid) w_grid_fill(w_grid, x, y, 0, { x: 1, y: 1, w: 2, h: 2 });
+        if (walkgrid) w_grid_fill(w_grid, x, y, 0, fill);
       }
 
       if (gval == GRABGRID_CRATE) {
-        if (render_fg) draw_tile(TILE_CRATE, dx+pad, dy+pad, 1);
+        if (render_fg) draw_tile(TILE_CRATE, dx+xpad, dy+ypad, 1);
         // if (walkgrid) w_grid_fill_no_edge(w_grid, x, y, 0);
-        if (walkgrid) w_grid_fill(w_grid, x, y, 0, { x: 1, y: 1, w: 2, h: 2 });
+        if (walkgrid) w_grid_fill(w_grid, x, y, 0, fill);
       }
     }
 }
