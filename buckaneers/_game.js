@@ -1,21 +1,17 @@
-"use strict";
-
 // vim: sw=2 ts=2 expandtab smartindent ft=javascript
 const SPLITSCREEN = false;
 const BROWSER_HOST = true;
 const BROWSER = (typeof window) == "object";
 const NODE = !BROWSER;
-const WALKGRID_DEBUG_DRAW = false;
 
 /* idk, let's have 22 tiles on the screen? */
 /* note: size of players, entities multiplied by this */
 const TILE_COUNT = 22;
 const TILE_SIZE = 1/TILE_COUNT;
 const PLAYER_SIZE = TILE_SIZE*0.7;
-const PLAYER_RADIUS = PLAYER_SIZE*0.2;
 
 /* "hards" are subtile things you can run into */
-const HARDS_PER_TILE = 3;
+const HARDS_PER_TILE = 2;
 const HARD_SIZE = TILE_SIZE/HARDS_PER_TILE;
 const HARD_COUNT = TILE_COUNT*HARDS_PER_TILE;
 
@@ -26,23 +22,13 @@ const SPEAR_THROW_DIST = 0.35;
 const SPEAR_THROW_SECS = 0.8;
 const SPEAR_FADE_SECS = SPEAR_THROW_SECS*0.4;
 const SPEAR_WIND_UP_RATIO = 0.87;
-const SPEAR_ROTATE_SPEED = 0.007;
 const DASH_TICKS = Math.floor(SECOND_IN_TICKS*0.35);
 const DASH_DIST  = TILE_SIZE*2.4;
 
 const WALKGRID_WALK = 1;
 const WALKGRID_FLY  = 2;
 
-const GRABGRID_NONE        = 0;
-const GRABGRID_CRATE       = 1;
-const GRABGRID_BARREL      = 2;
-const GRABGRID_SCRAP_TAKEN = 3;
-
 /* vektorr maffz */
-const edges = [{ x: -1, y:  1 },
-               { x: -1, y: -1 },
-               { x:  1, y:  1 },
-               { x:  1, y: -1 }];
 function ease_out_quad(x) { return 1 - (1 - x) * (1 - x); }
 function ease_in_elastic(x) {
   const c4 = (2 * Math.PI) / 3;
@@ -269,12 +255,6 @@ function noise3(
   return stb__perlin_lerp(n0,n1,u);
 }
 
-function walk_grid_compute(state) {
-  const ret = do_map("walkgrid", { seed: state.map_seed });
-  do_grabgrid(state.grab_grid, "walkgrid", { w_grid: ret });
-  return ret;
-}
-
 let host_tick, send_host, recv_from_host;
 if ((BROWSER && BROWSER_HOST) || NODE) {
 
@@ -298,53 +278,35 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     return id;
   };
 
-  const walk_grid_clamp = (state, p, mask, opts={drag: 0}) => {
-    const walk_grid = walk_grid_compute(state);
+  const walk_grid_clamp = (walk_grid, p, mask) => {
+    const fhx = p.x / HARD_SIZE;
+    const fhy = p.y / HARD_SIZE;
+    const old_hx = p.hx;
+    const old_hy = p.hy;
+    const new_hx = Math.floor(fhx);
+    const new_hy = Math.floor(fhy);
 
-    const adjacent = (hx, hy, world_x, world_y) => {
-      const fhx = world_x / HARD_SIZE;
-      const fhy = world_y / HARD_SIZE;
-      const old_hx = hx;
-      const old_hy = hy;
-      const new_hx = Math.floor(fhx);
-      const new_hy = Math.floor(fhy);
+    if (new_hx != p.hx || new_hy != p.hy) {
+      if ((mask & walk_grid[old_hy*HARD_COUNT + new_hx]) == 0) {
+        let x = fhx - p.hx;
+        if (x <= 0) x = 0 + 0.001;
+        if (x >= 1) x = 1 - 0.001;
+        p.x = (p.hx + x)*HARD_SIZE;
+      } else
+        p.hx = new_hx;
 
-      const ret = { hit: 0, hx, hy, world_x, world_y };
-
-      if (new_hx != hx || new_hy != hy) {
-        if ((mask & walk_grid[old_hy*HARD_COUNT + new_hx]) == 0) {
-          let x = fhx - hx;
-          if (x <= 0) x = 0 + 0.001, ret.hit = 1;
-          if (x >= 1) x = 1 - 0.001, ret.hit = 1;
-          ret.world_x = (hx + x)*HARD_SIZE;
-        } else
-          ret.hx = new_hx;
-
-        if ((mask & walk_grid[new_hy*HARD_COUNT + old_hx]) == 0) {
-          let y = fhy - hy;
-          if (y <= 0) y = 0 + 0.001, ret.hit = 1;
-          if (y >= 1) y = 1 - 0.001, ret.hit = 1;
-          ret.world_y = (hy + y)*HARD_SIZE;
-        } else
-          ret.hy = new_hy;
-      }
-
-      return ret;
-    }
-
-    {
-      const r = adjacent(p.hx, p.hy, p.x, p.y);
-      if (!opts.drag && r.hit) return r.hit;
-      p.x = r.world_x;
-      p.y = r.world_y;
-      p.hx = r.hx;
-      p.hy = r.hy;
-      return r.hit;
+      if ((mask & walk_grid[old_hy*HARD_COUNT + new_hx]) == 0) {
+        let y = fhy - p.hy;
+        if (y <= 0) y = 0 + 0.001;
+        if (y >= 1) y = 1 - 0.001;
+        p.y = (p.hy + y)*HARD_SIZE;
+      } else
+        p.hy = new_hy;
     }
   }
 
   const default_state = () => {
-    const map_seed = 54; // Math.floor(Math.random()*256);
+    const map_seed = 51; // Math.floor(Math.random()*256);
     /* good seeds: 51 */
 
     const ret = {
@@ -370,6 +332,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       map_seed,
       grab_grid: do_map("grabgrid", { seed: map_seed }),
+      walk_grid: do_map("walkgrid", { seed: map_seed }),
     };
     console.log(ret.grab_grid);
 
@@ -506,12 +469,6 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
             vx: 0.0,
             vy: 0.0,
             dash: { dx: 0, dy: 0, tick_start: 0, tick_end: 0 },
-            points: [
-              { hx:  1, hy:  0 },
-              { hx: -1, hy:  0 },
-              { hx:  0, hy:  1 },
-              { hx:  0, hy: -1 }
-            ],
             attack: {
               tick_msg_earliest: 0,
               tick_msg_latest: 0,
@@ -523,16 +480,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
             waffle: [],
             id: state.id_gen++
           };
-          const p = state.players[p_id];
-          p.hx = Math.floor(p.x / HARD_SIZE);
-          p.hy = Math.floor(p.y / HARD_SIZE);
-
-          let i = 0;
-          for (const { x, y } of edges) {
-            p.points[i].hx = Math.floor((p.x + x*PLAYER_RADIUS) / HARD_SIZE);
-            p.points[i].hy = Math.floor((p.y + y*PLAYER_RADIUS) / HARD_SIZE);
-            i++;
-          }
+          state.players[p_id].hx = Math.floor(state.players[p_id].x / HARD_SIZE);
+          state.players[p_id].hy = Math.floor(state.players[p_id].y / HARD_SIZE);
         }
       }
 
@@ -558,25 +507,13 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           }
         }
 
-        let i = 0;
-        for (const point of p.points) {
-          point.x = (p.x + edges[i].x*PLAYER_RADIUS)
-          point.y = (p.y + edges[i].y*PLAYER_RADIUS)
-          i++;
-
-          const b4_x = point.x;
-          const b4_y = point.y;
-          walk_grid_clamp(state, point, WALKGRID_WALK, { drag: 1 });
-          p.x += point.x - b4_x;
-          p.y += point.y - b4_y;
-        }
+        walk_grid_clamp(state.walk_grid, p, WALKGRID_WALK);
 
         {
           const tx = Math.floor(p.x / TILE_SIZE);
           const ty = Math.floor(p.y / TILE_SIZE);
-          if (state.grab_grid[ty*TILE_COUNT + tx] > GRABGRID_SCRAP_TAKEN) {
-            state.grab_grid[ty*TILE_COUNT + tx] = GRABGRID_SCRAP_TAKEN;
-            console.log("omnomnom, as it were");
+          if (state.grab_grid[ty*TILE_COUNT + tx] == 1) {
+            state.grab_grid[ty*TILE_COUNT + tx] = 0;
           }
         }
 
@@ -603,10 +540,9 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           a.streak = 'cooldown';
           a.tick_cooldown_over = state.tick + 1.5*SECOND_IN_TICKS;
 
-          const spr = {
+          const sp = {
             id: state.idgen++,
 
-            stage: "flying", // "flying" | "dropped"
             x: p.x + a.dx*SPEAR_RELEASE_FWD - a.dy*SPEAR_RELEASE_OUT,
             y: p.y + a.dy*SPEAR_RELEASE_FWD + a.dx*SPEAR_RELEASE_OUT,
             tick_death: state.tick + SECOND_IN_TICKS*SPEAR_THROW_SECS,
@@ -617,10 +553,10 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
             dx: a.dx,
             dy: a.dy,
           };
-          spr.hx = Math.floor(spr.x / HARD_SIZE);
-          spr.hy = Math.floor(spr.y / HARD_SIZE);
-          if (walk_grid_compute(state)[spr.hy*HARD_COUNT + spr.hx])
-            state.spears.push(spr);
+          sp.hx = Math.floor(sp.x / HARD_SIZE);
+          sp.hy = Math.floor(sp.y / HARD_SIZE);
+          if (state.walk_grid[sp.hy*HARD_COUNT + sp.hx])
+            state.spears.push(sp);
         }
       }
 
@@ -633,10 +569,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           let { id, x, y, tick_death } = spear;
           if (Object.keys(spear.passengers).length)
             tick_death = tick_death_never;
-          const ret = { id, x, y, tick_death };
-          if (spear.stage == "dropped")
-            ret.angle = Math.atan2(spear.dy, spear.dx);
-          return ret;
+          return { id, x, y, tick_death };
         });
       const players = Object
         .values(state.players)
@@ -756,52 +689,47 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         return ret;
       };
 
-      if (spear.stage == "flying") {
-        const b4_x = spear.x;
-        const b4_y = spear.y;
-        spear.x += spear.dx * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
-        spear.y += spear.dy * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
+      const b4_x = spear.x;
+      const b4_y = spear.y;
+      spear.x += spear.dx * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
+      spear.y += spear.dy * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
+      walk_grid_clamp(state.walk_grid, spear, WALKGRID_FLY);
 
-        if (walk_grid_clamp(state, spear, WALKGRID_FLY)) {
-          spear.stage = "dropped";
-        }
-
-        /* quadratic perf go WEEEE */
-        for (const wolf_id in state.wolves) {
-          const wolf = state.wolves[wolf_id];
-          const dist = point_to_line( wolf.x,  wolf.y,
-                                        b4_x,    b4_y,
-                                     spear.x, spear.y);
-          if (dist < TILE_SIZE*0.435) {
-            const key = ''+[wolf_id, spear.id];
-            if (!(key in state.hit_table)) {
-              wolf.hp -= 1;
-              state.hit_table[key] = state.tick;
-              if (wolf.hp <= 0) {
-                spawn_wolf(state); spawn_wolf(state);
-                delete state.wolves[wolf_id];
-                continue;
-              }
+      /* quadratic perf go WEEEE */
+      for (const wolf_id in state.wolves) {
+        const wolf = state.wolves[wolf_id];
+        const dist = point_to_line( wolf.x,  wolf.y,
+                                      b4_x,    b4_y,
+                                   spear.x, spear.y);
+        if (dist < TILE_SIZE*0.435) {
+          const key = ''+[wolf_id, spear.id];
+          if (!(key in state.hit_table)) {
+            wolf.hp -= 1;
+            state.hit_table[key] = state.tick;
+            if (wolf.hp <= 0) {
+              spawn_wolf(state); spawn_wolf(state);
+              delete state.wolves[wolf_id];
+              continue;
             }
           }
-          if (dist < TILE_SIZE*0.4) {
-            spear.passengers[wolf_id] = state.wolves[wolf_id];
-            delete state.wolves[wolf_id];
-
-            spear.passengers[wolf_id].x -= spear.x;
-            spear.passengers[wolf_id].y -= spear.y;
-
-            const duration = spear.tick_death - spear.tick_birth;
-            spear.tick_death = spear.tick_birth + duration*p_x(spear);
-          }
         }
+        if (dist < TILE_SIZE*0.4) {
+          spear.passengers[wolf_id] = state.wolves[wolf_id];
+          delete state.wolves[wolf_id];
 
-        /* wrap around the edges pacman style */
-        if (spear.x < 0) spear.x = 1 - Math.abs(spear.x);
-        if (spear.x > 1) spear.x = spear.x - 1;
-        if (spear.y < 0) spear.y = 1 - Math.abs(spear.y);
-        if (spear.y > 1) spear.y = spear.y - 1;
+          spear.passengers[wolf_id].x -= spear.x;
+          spear.passengers[wolf_id].y -= spear.y;
+
+          const duration = spear.tick_death - spear.tick_birth;
+          spear.tick_death = spear.tick_birth + duration*p_x(spear);
+        }
       }
+
+      /* wrap around the edges pacman style */
+      if (spear.x < 0) spear.x = 1 - Math.abs(spear.x);
+      if (spear.x > 1) spear.x = spear.x - 1;
+      if (spear.y < 0) spear.y = 1 - Math.abs(spear.y);
+      if (spear.y > 1) spear.y = spear.y - 1;
 
       t = inv_lerp(spear.tick_birth, spear.tick_death, state.tick);
       if (t >= 1) {
@@ -1264,7 +1192,10 @@ function client_mouse_event(canvas, state, ev) {
   if (type == 'mousedown') state.mousedown = true;
 }
 
+const SPEAR_ROTATE_SPEED = 0.007;
 function client(state, canvas, elapsed, dt) {
+  client_last = elapsed;
+
   const id = state.id;
 
   /* take messages from server */
@@ -1374,9 +1305,9 @@ function render(state, canvas, elapsed, dt) {
     const bg = do_map("render", {
       width: canvas.width,
       seed: world.map_seed,
+      grab_grid: world.grab_grid,
     });
     ctx.drawImage(bg, 0, 0, bg.width, bg.height, 0, 0, 1, 1);
-    do_grabgrid(world.grab_grid, "render_bg", { ctx });
 
     const draw_tile = (tile, dx, dy, dsize, angle) => {
       if (angle != undefined) {
@@ -1498,16 +1429,14 @@ function render(state, canvas, elapsed, dt) {
       draw_tile(hand, x - ox - hanim_x*0.7,
                       y - oy - hanim_y*0.7, PLAYER_SIZE, Math.PI/2 - angle);
     }
-    for (const spr of world.spears) {
-      const { x, y, tick_death, id } = spr;
-
+    for (const { x, y, tick_death, id } of world.spears) {
       /* canvas treats alphas > 1 the same as 1 */
       const ttl = tick_death - world.tick;
       ctx.globalAlpha = ttl / (SECOND_IN_TICKS*SPEAR_FADE_SECS);
 
       const last_pos = last_world.spears.find(x => x.id == id);
       if (!last_pos) continue;
-      const angle = spr.angle ?? Math.atan2(y - last_pos.y, x - last_pos.x);
+      const angle = Math.atan2(y - last_pos.y, x - last_pos.x);
 
       draw_tile(TILE_SPEAR, x, y, PLAYER_SIZE, angle + Math.PI/2);
 
@@ -1547,15 +1476,8 @@ function render(state, canvas, elapsed, dt) {
       ctx.globalAlpha = 1;
     }
 
-    do_grabgrid(world.grab_grid, "render_fg", { ctx });
-
     const fg = do_map("render_fg", { width: canvas.width, seed: world.map_seed });
     ctx.drawImage(fg, 0, 0, fg.width, fg.height, 0, 0, 1, 1);
-
-    if (WALKGRID_DEBUG_DRAW) {
-      const state = JSON.parse(localStorage.getItem("host_state"));
-      walkgrid_draw(ctx, walk_grid_compute(state));
-    }
 
   }; ctx.restore();
 
@@ -1574,98 +1496,33 @@ function render(state, canvas, elapsed, dt) {
   }
 }
 
-function w_grid_fill(w_grid, x, y, num, opts) {
-  opts ??= { x: 0, y: 0, w: HARDS_PER_TILE, h: HARDS_PER_TILE, edge: 1 };
-  const hx = HARDS_PER_TILE*x;
-  const hy = HARDS_PER_TILE*y;
-  for (let dx = opts.x; dx < HARDS_PER_TILE; dx++) {
-    for (let dy = opts.y; dy < HARDS_PER_TILE; dy++)
-      w_grid[(hy+dy)*HARD_COUNT + (hx+dx)] = num;
-  }
-}
-function w_grid_fill_no_edge(w_grid, x, y, num) {
-  const hx = HARDS_PER_TILE*x;
-  const hy = HARDS_PER_TILE*y;
-
-  for (let dx = 0; dx < HARDS_PER_TILE; dx++) {
-    for (let dy = 0; dy < HARDS_PER_TILE; dy++) {
-      const max = HARDS_PER_TILE-1;
-      if ((dx == 0 || dx == max) && (dy == 0 || dy == max)) continue;
-      w_grid[(hy+dy)*HARD_COUNT + (hx+dx)] = num;
-    }
-  }
-}
-
-function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
-  const walkgrid = mode == "walkgrid";
-  const render_bg = mode == "render_bg";
-  const render_fg = mode == "render_fg";
-
-  const draw_tile = (tile, dx, dy) => {
-    ctx.drawImage(
-      spritesheet,
-
-      /* source x & y on spritesheet */
-      tile.x*TILE_PIXELS, tile.y*TILE_PIXELS,
-      /* source width and height on spritesheet */
-      tile.w*TILE_PIXELS, tile.h*TILE_PIXELS,
-
-      /* destination x & y in world */
-      dx, dy,
-      /* destination width and height in world */
-      TILE_SIZE, TILE_SIZE
-    );
-  };
-  const TILE_SCRAP  = { w: 1, h: 1, x: 13, y: 2 };
-  const TILE_CRATE  = { w: 1, h: 1, x: 10, y: 6 };
-  const TILE_BARREL = { w: 1, h: 1, x: 10, y: 7 };
-  const pad = TILE_SIZE/3/2; // 0;
-
-  for (let x = 0; x < TILE_COUNT; x++)
-    for (let y = 0; y < TILE_COUNT; y++) {
-      const dx = x * TILE_SIZE;
-      const dy = y * TILE_SIZE;
-      const gval = g_grid[y*TILE_COUNT + x];
-
-      if (gval >= GRABGRID_SCRAP_TAKEN) {
-        if (render_bg) {
-          if (gval == GRABGRID_SCRAP_TAKEN) ctx.globalAlpha = 0.3;
-          draw_tile(TILE_SCRAP, dx, dy, 1);
-          ctx.globalAlpha = 1.0;
-        }
-      }
-
-      if (gval == GRABGRID_BARREL) {
-        if (render_fg) draw_tile(TILE_BARREL, dx+pad, dy+pad, 1);
-        // if (walkgrid) w_grid_fill_no_edge(w_grid, x, y, 0);
-        if (walkgrid) w_grid_fill(w_grid, x, y, 0, { x: 1, y: 1, w: 2, h: 2 });
-      }
-
-      if (gval == GRABGRID_CRATE) {
-        if (render_fg) draw_tile(TILE_CRATE, dx+pad, dy+pad, 1);
-        // if (walkgrid) w_grid_fill_no_edge(w_grid, x, y, 0);
-        if (walkgrid) w_grid_fill(w_grid, x, y, 0, { x: 1, y: 1, w: 2, h: 2 });
-      }
-    }
-}
-
 let cached_bg,
     cached_hash_bg,
     cached_fg,
     cached_seed_fg;
-function do_map(mode, { seed, width }) {
+function do_map(mode, { seed, width, grab_grid }) {
+  /* width and grab_grid are used in bg,
+   * TODO: add "is_" because grab_grid is a grid and grabgrid is a boolean */
   const render = mode == "render";
   const render_fg = mode == "render_fg"; /* foreground, floating layer (tree) */
-  const walkgrid = mode == "walkgrid";
+  const walkgrid = true;// mode == "walkgrid";
   const grabgrid = mode == "grabgrid";
 
   let g_grid, w_grid;
-  if (grabgrid) g_grid = [...Array(TILE_COUNT*TILE_COUNT)].fill(GRABGRID_NONE);
+  if (grabgrid) g_grid = [...Array(TILE_COUNT*TILE_COUNT)].fill(0);
   if (walkgrid) w_grid = [...Array(HARD_COUNT*HARD_COUNT)].fill(WALKGRID_FLY);
+  const w_grid_fill = (x, y, num) => {
+    const hx = HARDS_PER_TILE*x;
+    const hy = HARDS_PER_TILE*y;
+    w_grid[(hy+0)*HARD_COUNT + (hx+0)] = num;
+    w_grid[(hy+1)*HARD_COUNT + (hx+0)] = num;
+    w_grid[(hy+0)*HARD_COUNT + (hx+1)] = num;
+    w_grid[(hy+1)*HARD_COUNT + (hx+1)] = num;
+  }
 
   let fg, bg, ctx;
   if (render) {
-    const hash = seed;
+    const hash = seed + grab_grid;
     if (cached_bg && cached_bg.width == width && hash == cached_hash_bg)
       return cached_bg;
 
@@ -1708,6 +1565,9 @@ function do_map(mode, { seed, width }) {
   const TILE_PLANK  = { w: 1, h: 1, x:  0, y: 6 };
   const TILE_STUDS  = { w: 1, h: 1, x: 11, y: 1 };
   const TILE_FLOWER = { w: 1, h: 1, x: 11, y: 6 };
+  const TILE_SCRAP  = { w: 1, h: 1, x: 13, y: 2 };
+  const TILE_CRATE  = { w: 1, h: 1, x: 10, y: 6 };
+  const TILE_BARREL = { w: 1, h: 1, x: 10, y: 7 };
   const TILE_WET    = { w: 1, h: 1, x: 13, y: 6 };
   const TILE_TREE   = { w: 1, h: 1, x: 11, y: 7 };
 
@@ -1747,7 +1607,7 @@ function do_map(mode, { seed, width }) {
 
       // const sat = hsl_s - Math.floor(noise*40 /5)*5;
       if (walkgrid) {
-        w_grid_fill(w_grid, x, y, WALKGRID_WALK | WALKGRID_FLY);
+        w_grid_fill(x, y, WALKGRID_WALK | WALKGRID_FLY);
       }
       if (render) {
         /* background circles */
@@ -1870,7 +1730,7 @@ function do_map(mode, { seed, width }) {
       if (cy == 0) tile = TILE_PLANK, flip = 1;
       if (tile != undefined) {
         if (walkgrid) {
-          w_grid_fill(w_grid, x, y, WALKGRID_WALK | WALKGRID_FLY);
+          w_grid_fill(x, y, WALKGRID_WALK | WALKGRID_FLY);
         }
         if (render) {
           ctx.fillStyle = `hsl(25, ${hsl_s+35}%, ${hsl_l-35}%)`;
@@ -1902,29 +1762,27 @@ function do_map(mode, { seed, width }) {
       //
       const six = TILE_SIZE/3/2;
       if (walkgrid) {
+        const wval = 0; /* no walk, no fly, nuffin */
+
         let hx = HARDS_PER_TILE*x;
         let hy = HARDS_PER_TILE*y;
-        if (cx == 0) w_grid[(hy+2)*HARD_COUNT + (hx+2)] = 0,
-                     w_grid[(hy+1)*HARD_COUNT + (hx+2)] = 0,
-                     w_grid[(hy+0)*HARD_COUNT + (hx+2)] = 0;
-        if (cy == 0) w_grid[(hy+0)*HARD_COUNT + (hx+2)] = 0,
-                     w_grid[(hy+0)*HARD_COUNT + (hx+1)] = 0,
-                     w_grid[(hy+0)*HARD_COUNT + (hx+0)] = 0;
+        if (cx == 0) w_grid[(hy+1)*HARD_COUNT + (hx+1)] = wval,
+                     w_grid[(hy+0)*HARD_COUNT + (hx+1)] = wval;
+        if (cy == 0) w_grid[(hy+0)*HARD_COUNT + (hx+1)] = wval,
+                     w_grid[(hy+0)*HARD_COUNT + (hx+0)] = wval;
 
         /* reach into the adjacent tile and set some hards */
         if (cx == 0) hx += HARDS_PER_TILE,
-                     w_grid[(hy+0)*HARD_COUNT + (hx+0)] = 0,
-                     w_grid[(hy+1)*HARD_COUNT + (hx+0)] = 0,
-                     w_grid[(hy+2)*HARD_COUNT + (hx+0)] = 0,
+                     w_grid[(hy+0)*HARD_COUNT + (hx+0)] = wval,
+                     w_grid[(hy+1)*HARD_COUNT + (hx+0)] = wval,
                      hx -= HARDS_PER_TILE;
         if (cy == 0) hy -= HARDS_PER_TILE,
-                     w_grid[(hy+2)*HARD_COUNT + (hx+0)] = 0,
-                     w_grid[(hy+2)*HARD_COUNT + (hx+1)] = 0,
-                     w_grid[(hy+2)*HARD_COUNT + (hx+2)] = 0;
+                     w_grid[(hy+1)*HARD_COUNT + (hx+0)] = wval,
+                     w_grid[(hy+1)*HARD_COUNT + (hx+1)] = wval;
       }
-      if (render_fg) {
-        if (cy == 0) draw_tile(TILE_WALL, dx    , dy-six);
-        if (cx == 0) draw_tile(TILE_WALL, dx+six, dy, 1);
+      if (render) {
+        if (cx == 0) draw_tile(TILE_WALL, dx+six, dy-six, 1);
+        if (cy == 0) draw_tile(TILE_WALL, dx+six, dy-six);
       }
     }
   if (render) ctx.globalAlpha = 1;
@@ -1952,22 +1810,24 @@ function do_map(mode, { seed, width }) {
         }
       }
 
-      const g_i = y*TILE_COUNT + x;
-      const six = TILE_SIZE/3/2;
-
       if (ruins_noise(dx, dy) > RUINS_THRESHOLD*1.56 &&
           ruins_noise(dx, dy) < RUINS_THRESHOLD*1.65) {
+        const g_i = y*TILE_COUNT + x;
 
-        if (grabgrid) g_grid[g_i] = GRABGRID_SCRAP_TAKEN + 2;
+        if (render) {
+          if (grab_grid[g_i] == 0) ctx.globalAlpha = 0.3;
+          draw_tile(TILE_SCRAP, dx, dy, 1);
+          ctx.globalAlpha = 1.0;
+        }
+        if (grabgrid) g_grid[g_i] = 1;
       }
       if (ruins_noise(dx, dy) > RUINS_THRESHOLD*1.65 &&
           ruins_noise(dx, dy) < RUINS_THRESHOLD*1.70) {
-        if (grabgrid) g_grid[g_i] = GRABGRID_CRATE;
+        if (render) draw_tile(TILE_CRATE, dx, dy, 1);
       }
       if (ruins_noise(dx, dy) > RUINS_THRESHOLD*1.70 &&
           ruins_noise(dx, dy) < RUINS_THRESHOLD*1.75) {
-        if (grabgrid) g_grid[g_i] = GRABGRID_BARREL;
-
+        if (render) draw_tile(TILE_BARREL, dx, dy, 1);
       }
 
       if (ruins_noise(dx, dy) > RUINS_THRESHOLD*2.2 &&
@@ -1976,7 +1836,7 @@ function do_map(mode, { seed, width }) {
 
         /* no walking on trees */
         if (walkgrid)
-          w_grid_fill(w_grid, x, y, 0);
+          w_grid_fill(x, y, 0); /* no walk, no fly, nuffin */
 
         if (render_fg) {
           ctx.globalAlpha = 0.93;
@@ -2002,23 +1862,24 @@ function do_map(mode, { seed, width }) {
       }
     }
 
-  if (mode == "render"   ) return bg;
-  if (mode == "render_fg") return fg;
-  if (mode == "walkgrid" ) return w_grid;
-  if (mode == "grabgrid" ) return g_grid;
-}
+  if (render) {
+    ctx.globalAlpha = 0.8;
+    for (let x = 0; x < HARD_COUNT; x++)
+      for (let y = 0; y < HARD_COUNT; y++) {
+        const dx = x * HARD_SIZE;
+        const dy = y * HARD_SIZE;
+        // const wval = w_grid
+        if (w_grid[y*HARD_COUNT + x] == 3) ctx.fillStyle = "magenta";
+        if (w_grid[y*HARD_COUNT + x] == 2) ctx.fillStyle = "blue";
+        if (w_grid[y*HARD_COUNT + x] == 1) ctx.fillStyle = "red";
+        if (w_grid[y*HARD_COUNT + x] == 0) continue;
+        ctx.fillRect(dx, dy, HARD_SIZE, HARD_SIZE);
+      }
+    ctx.globalAlpha = 1;
+  }
 
-function walkgrid_draw(ctx, w_grid) {
-  ctx.globalAlpha = 0.8;
-  for (let x = 0; x < HARD_COUNT; x++)
-    for (let y = 0; y < HARD_COUNT; y++) {
-      const dx = x * HARD_SIZE;
-      const dy = y * HARD_SIZE;
-      if (w_grid[y*HARD_COUNT + x] == 0) continue;
-      if (w_grid[y*HARD_COUNT + x] == 1) ctx.fillStyle = "red";
-      if (w_grid[y*HARD_COUNT + x] == 2) ctx.fillStyle = "blue";
-      if (w_grid[y*HARD_COUNT + x] == 3) ctx.fillStyle = "magenta";
-      ctx.fillRect(dx, dy, HARD_SIZE, HARD_SIZE);
-    }
-  ctx.globalAlpha = 1;
+  if (mode == "render") return bg;
+  if (mode == "render_fg") return fg;
+  if (mode == "walkgrid") return w_grid;
+  if (mode == "grabgrid") return g_grid;
 }
