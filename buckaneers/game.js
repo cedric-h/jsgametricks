@@ -453,7 +453,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         player.attack.dx = d.x;
         player.attack.dy = d.y;
         player.attack.tick_msg_latest = state.tick;
-        if (player.attack.streak == 'dormant')
+        if (player.attack.streak == 'dormant' && (player.spear_count > 0))
           player.attack.streak = 'active',
           player.attack.tick_msg_earliest = state.tick;
       }
@@ -495,7 +495,9 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     {
       /* spawn a player for each client mailbox (if not one already)
        * (if we ever have a spectator mode or char creation screen,
-       *  this won't make sense anymore) */
+       *  this won't make sense anymore)
+       *
+       *  ... or we could just mark them as dead to prevent this >:) */
       for (const p_id in state.client_mailboxes) {
         if (state.client_dead[p_id]) continue;
 
@@ -505,6 +507,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
             y: 0.5,
             vx: 0.0,
             vy: 0.0,
+            spear_count: 0,
             dash: { dx: 0, dy: 0, tick_start: 0, tick_end: 0 },
             points: [
               { hx:  1, hy:  0 },
@@ -516,7 +519,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
               tick_msg_earliest: 0,
               tick_msg_latest: 0,
               tick_cooldown_over: 0,
-              streak: 'dormant', // 'dormant' | 'cooldown' | 'active'
+              streak: "dormant", // "dormant" | "cooldown" | "active"
               dx: 0,
               dy: 0,
             },
@@ -574,16 +577,18 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         {
           const tx = Math.floor(p.x / TILE_SIZE);
           const ty = Math.floor(p.y / TILE_SIZE);
-          if (state.grab_grid[ty*TILE_COUNT + tx] > GRABGRID_SCRAP_TAKEN) {
-            state.grab_grid[ty*TILE_COUNT + tx] = GRABGRID_SCRAP_TAKEN;
+          const g_i = ty*TILE_COUNT + tx;
+          if (state.grab_grid[g_i] > GRABGRID_SCRAP_TAKEN) {
+            p.spear_count += state.grab_grid[g_i] - GRABGRID_SCRAP_TAKEN;
+            state.grab_grid[g_i] = GRABGRID_SCRAP_TAKEN;
             console.log("omnomnom, as it were");
           }
         }
 
-        if (p.attack.streak == 'dormant') continue;
-        if (p.attack.streak == 'cooldown') {
+        if (p.attack.streak == "dormant") continue;
+        if (p.attack.streak == "cooldown") {
           if (state.tick >= p.attack.tick_cooldown_over)
-            p.attack.streak = 'dormant';
+            p.attack.streak = "dormant";
           continue;
         }
 
@@ -591,16 +596,16 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         const ticks_since_latest = state.tick - p.attack.tick_msg_latest;
         if (ticks_since_latest >= ATTACK_TIMEOUT)
           // console.log("streak broken by timeout"),
-          p.attack.streak = 'dormant';
+          p.attack.streak = "dormant";
 
-        /* you waited the full time without breaking the streak, you attack */
+        /* you waited the full time without breaking the streak, so attack */
         const ticks_since_earliest = state.tick - p.attack.tick_msg_earliest;
         const prog = ticks_since_earliest / ATTACK_PREPARE_DURATION;
         if (prog >= 1) {
           // console.log("streak broken by completion");
           const a = p.attack;
 
-          a.streak = 'cooldown';
+          a.streak = "cooldown";
           a.tick_cooldown_over = state.tick + 1.5*SECOND_IN_TICKS;
 
           const spr = {
@@ -619,8 +624,10 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           };
           spr.hx = Math.floor(spr.x / HARD_SIZE);
           spr.hy = Math.floor(spr.y / HARD_SIZE);
-          if (walk_grid_compute(state)[spr.hy*HARD_COUNT + spr.hx])
+          if (walk_grid_compute(state)[spr.hy*HARD_COUNT + spr.hx]) {
+            p.spear_count--;
             state.spears.push(spr);
+          }
         }
       }
 
@@ -674,7 +681,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         const { attack } = Object.values(state.players)[i];
         const p_msg = players[i];
 
-        if (attack.streak == 'dormant') continue;
+        if (attack.streak == "dormant") continue;
 
         const ticks_since_earliest = state.tick - attack.tick_msg_earliest;
         const prog = ticks_since_earliest / ATTACK_PREPARE_DURATION;
@@ -690,19 +697,25 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       const grab_grid = state.grab_grid.join('');
 
+      const day_100 = () => state.tick / SECOND_IN_TICKS;
+      const hud = { spear_count: 0, day_100: day_100(state) };
+
       for (const p_id in state.client_mailboxes) {
         const mailbox = state.client_mailboxes[p_id];
 
         /* maybe confusing, but we're going from
          * "id of client with mailbox" to
          * "id of entity in game they control" */
+        hud.spear_count = 0;
         let you = -1;
-        if (p_id in state.players)
+        if (p_id in state.players) {
+          hud.spear_count = state.players[p_id].spear_count;
           you = state.players[p_id].id;
+        }
 
         mailbox.unshift(JSON.stringify([
           "tick",
-          { tick, grab_grid, map_seed, players, spears, wolves, you }
+          { tick, grab_grid, map_seed, players, spears, wolves, you, hud }
         ]));
       }
     }
@@ -762,8 +775,16 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
         spear.x += spear.dx * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
         spear.y += spear.dy * p_x(spear)*SPEAR_THROW_DIST*(t - lt);
 
-        if (walk_grid_clamp(state, spear, WALKGRID_FLY)) {
-          spear.stage = "dropped";
+        {
+          const tx = Math.floor(spear.x / TILE_SIZE);
+          const ty = Math.floor(spear.y / TILE_SIZE);
+          if (walk_grid_clamp(state, spear, WALKGRID_FLY)) {
+            spear.stage = "dropped";
+            if (state.grab_grid[ty*TILE_COUNT + tx] == GRABGRID_CRATE ||
+                state.grab_grid[ty*TILE_COUNT + tx] == GRABGRID_BARREL) {
+              state.grab_grid[ty*TILE_COUNT + tx] = GRABGRID_SCRAP_TAKEN + 2;
+            }
+          }
         }
 
         /* quadratic perf go WEEEE */
@@ -810,7 +831,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           state.wolves[id] = spear.passengers[id];
           state.wolves[id].x += spear.x;
           state.wolves[id].y += spear.y;
-          state.wolves[id].stage = 'dormant';
+          state.wolves[id].stage = "dormant";
         }
 
         /* now we ride wolf instead of wolf riding us
@@ -1084,12 +1105,14 @@ if (NODE) {
 /* default client state */
 const default_state = () => {
   const default_world = () => ({
+    tick: 0,
+    grab_grid: [...Array(TILE_COUNT*TILE_COUNT)].fill(0),
+    map_seed: 0,
     players: [],
     spears: [],
     wolves: [],
-    map_seed: 0,
-    grab_grid: [...Array(TILE_COUNT*TILE_COUNT)].fill(0),
-    tick: 0
+    you: undefined,
+    hud: { spear_count: 0, day_100: 1 }
   });
   const default_player = () => ({
     /* could prolly have server assign ids but i dont foresee a collision */
@@ -1558,6 +1581,25 @@ function render(state, canvas, elapsed, dt) {
     }
 
   }; ctx.restore();
+
+  {
+    const w = canvas. width;
+    const h = canvas.height;
+
+    ctx.font = '4vh monospace';
+    ctx.fillStyle = 'black';
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = w*0.002;
+    let c = 0;
+
+    const daystr_100 = (world.hud.day_100.toFixed(0) + '%').padStart(4);
+    const daystr = ('day: ' + daystr_100).padStart(10);
+    ctx.strokeText(daystr, w*0.8, c +  h*0.04);
+    ctx.fillText  (daystr, w*0.8, c += h*0.04);
+    const sprstr = (world.hud.spear_count + ' spears').padStart(10);
+    ctx.strokeText(sprstr, w*0.8, c +  h*0.04);
+    ctx.fillText  (sprstr, w*0.8, c += h*0.04);
+  }
 
   /* lerp camera
    * do not do this at the beginning of the frame! */
