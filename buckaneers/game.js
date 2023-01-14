@@ -38,6 +38,9 @@ const GRABGRID_CRATE       = 1;
 const GRABGRID_BARREL      = 2;
 const GRABGRID_SCRAP_TAKEN = 3;
 
+const DAYNIGHT_DAY   = 0;
+const DAYNIGHT_NIGHT = 1;
+
 /* vektorr maffz */
 const edges = [{ x: -1, y:  1 },
                { x: -1, y: -1 },
@@ -269,8 +272,15 @@ function noise3(
   return stb__perlin_lerp(n0,n1,u);
 }
 
+let walk_grid_cache = { grid: null, hash: "" };
 function walk_grid_compute(state) {
-  const ret = do_map("walkgrid", { seed: state.map_seed });
+  const hash = state.map_seed;
+  if (walk_grid_cache.hash != hash) {
+    walk_grid_cache.hash = hash;
+    walk_grid_cache.grid = do_map("walkgrid", { seed: state.map_seed });
+  }
+
+  const ret = [...walk_grid_cache.grid];
   do_grabgrid(state.grab_grid, "walkgrid", { w_grid: ret });
   return ret;
 }
@@ -343,8 +353,59 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
     }
   }
 
+  /* day; quest;
+   * little veneer over the simulation that drives the player through the world */
+  const DAY_SECS = 60;
+  const QUEST_STAGE_DAY_0 = 0;
+  const QUEST_STAGE_DAY_1 = 1;
+  function default_state_quest() {
+    return {
+      /* for damping */
+      day_t: 0,
+      daynight: DAYNIGHT_DAY,
+      stage: QUEST_STAGE_DAY_0,
+
+      tick_daynight_start: 0,
+      tick_daynight_end: SECOND_IN_TICKS * DAY_SECS,
+    };
+  }
+  function quest_tick(state) {
+    const stq = state.quest;
+
+    const time_t = inv_lerp(stq.tick_daynight_start,
+                            stq.tick_daynight_end,
+                            state.tick);
+    let t = time_t;
+
+    
+    /* damping */
+    const MAX_DAY_PER_TICK = 0.15 / SECOND_IN_TICKS; // 0.085 / SECOND_IN_TICKS;
+    stq.day_t += Math.min(MAX_DAY_PER_TICK, Math.max(0, t - stq.day_t));
+
+    if (stq.day_t > 1) {
+      stq.tick_daynight_start = state.tick;
+      stq.tick_daynight_end   = state.tick + SECOND_IN_TICKS * DAY_SECS;
+      stq.day_t = 0;
+      stq.daynight = (stq.daynight == DAYNIGHT_DAY) ? DAYNIGHT_NIGHT : DAYNIGHT_DAY;
+    }
+
+    return { daynight: stq.daynight, day_100: stq.day_t * 100 };
+  }
+    // if (stq.stage == QUEST_STAGE_DAY_0) {
+    //   const SPEARS_NEEDED = 5;
+    //   let spear_t = 0; 
+    //   for (const p_id in state.players)
+    //     spear_t += state.players[p_id].spear_count / SPEARS_NEEDED;
+
+    //   t = Math.max(spear_t, time_t);
+
+    //   if (t > 1) {
+    //     stq.stage = QUEST_STAGE_DAY_1;
+    //   }
+    // }
+
   const default_state = () => {
-    const map_seed = 54; // Math.floor(Math.random()*256);
+    const map_seed = 51; // Math.floor(Math.random()*256);
     /* good seeds: 51 */
 
     const ret = {
@@ -370,6 +431,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       map_seed,
       grab_grid: do_map("grabgrid", { seed: map_seed }),
+
+      quest: default_state_quest(),
     };
     console.log(ret.grab_grid);
 
@@ -492,6 +555,8 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
       }
     }
 
+    const { daynight, day_100 } = quest_tick(state);
+
     {
       /* spawn a player for each client mailbox (if not one already)
        * (if we ever have a spectator mode or char creation screen,
@@ -581,7 +646,6 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
           if (state.grab_grid[g_i] > GRABGRID_SCRAP_TAKEN) {
             p.spear_count += state.grab_grid[g_i] - GRABGRID_SCRAP_TAKEN;
             state.grab_grid[g_i] = GRABGRID_SCRAP_TAKEN;
-            console.log("omnomnom, as it were");
           }
         }
 
@@ -697,8 +761,7 @@ if ((BROWSER && BROWSER_HOST) || NODE) {
 
       const grab_grid = state.grab_grid.join('');
 
-      const day_100 = () => state.tick / SECOND_IN_TICKS;
-      const hud = { spear_count: 0, day_100: day_100(state) };
+      const hud = { spear_count: 0, day_100, daynight };
 
       for (const p_id in state.client_mailboxes) {
         const mailbox = state.client_mailboxes[p_id];
@@ -1112,7 +1175,7 @@ const default_state = () => {
     spears: [],
     wolves: [],
     you: undefined,
-    hud: { spear_count: 0, day_100: 1 }
+    hud: { spear_count: 0, day_100: 1, daynight: DAYNIGHT_DAY }
   });
   const default_player = () => ({
     /* could prolly have server assign ids but i dont foresee a collision */
@@ -1362,18 +1425,30 @@ function client(state, canvas, elapsed, dt) {
   render(state, canvas, elapsed, dt);
 }
 
+const daynight_t = world => Math.max(0, Math.min(1, (world.hud.day_100 - 90)/10));
+const day_t = world => {
+  const ret = daynight_t(world);
+  if (world.hud.daynight == DAYNIGHT_NIGHT) return ret;
+  else                                      return 1 - ret;
+}
 const spritesheet = new Image();
 spritesheet.src = "art.png";
 const TILE_PIXELS = spritesheet.height/11;
 function render(state, canvas, elapsed, dt) {
   const { world, last_world, cam } = state;
+  const night = world.hud.daynight == DAYNIGHT_NIGHT;
+  const ALPHA = lerp(0.4, 1, day_t(world));
 
   /* initialize canvas */
   const ctx = canvas.getContext("2d");
 
   /* clear canvas */
-  ctx.fillStyle = `hsl(199, 50%, 58%)`;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  {
+    const hsl_s   = lerp(11, 50, day_t(world));
+    const hsl_l   = lerp(13, 58, day_t(world));
+    ctx.fillStyle = `hsl(199, ${hsl_s}%, ${hsl_l}%)`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   ctx.save(); {
     /* make the window wider, it'll zoom.
@@ -1397,9 +1472,22 @@ function render(state, canvas, elapsed, dt) {
     const bg = do_map("render", {
       width: canvas.width,
       seed: world.map_seed,
+      daynight: world.hud.daynight,
     });
     ctx.drawImage(bg, 0, 0, bg.width, bg.height, 0, 0, 1, 1);
-    do_grabgrid(world.grab_grid, "render_bg", { ctx });
+    if (world.hud.day_100 > 90) {
+      let daynight = world.hud.daynight;
+      daynight = (daynight == DAYNIGHT_DAY) ? DAYNIGHT_NIGHT : DAYNIGHT_DAY;
+      const bg_flip = do_map("render", {
+        width: canvas.width,
+        seed: world.map_seed,
+        daynight,
+      });
+      ctx.globalAlpha = daynight_t(world);
+      ctx.drawImage(bg_flip, 0, 0, bg_flip.width, bg_flip.height, 0, 0, 1, 1);
+      ctx.globalAlpha = 1;
+    }
+    do_grabgrid(world.grab_grid, "render_bg", { ctx, day_t: day_t(world) });
 
     const draw_tile = (tile, dx, dy, dsize, angle) => {
       if (angle != undefined) {
@@ -1438,6 +1526,7 @@ function render(state, canvas, elapsed, dt) {
       );
     }
 
+    ctx.globalAlpha = ALPHA;
     for (const p of world.players) {
       const { id, x, y, attack } = p;
       
@@ -1521,12 +1610,16 @@ function render(state, canvas, elapsed, dt) {
       draw_tile(hand, x - ox - hanim_x*0.7,
                       y - oy - hanim_y*0.7, PLAYER_SIZE, Math.PI/2 - angle);
     }
+    ctx.globalAlpha = ALPHA;
+
     for (const spr of world.spears) {
       const { x, y, tick_death, id } = spr;
 
-      /* canvas treats alphas > 1 the same as 1 */
-      const ttl = tick_death - world.tick;
-      ctx.globalAlpha = ttl / (SECOND_IN_TICKS*SPEAR_FADE_SECS);
+      {
+        const ttl = tick_death - world.tick;
+        const t = Math.min(1, ttl / (SECOND_IN_TICKS*SPEAR_FADE_SECS));
+        ctx.globalAlpha = ALPHA * t;
+      }
 
       const last_pos = last_world.spears.find(x => x.id == id);
       if (!last_pos) continue;
@@ -1535,7 +1628,7 @@ function render(state, canvas, elapsed, dt) {
       draw_tile(TILE_SPEAR, x, y, PLAYER_SIZE, angle + Math.PI/2);
 
       /* bad things happen if you forget to reset this */
-      ctx.globalAlpha = 1.0;
+      ctx.globalAlpha = ALPHA;
     }
 
     for (const wolf of world.wolves) {
@@ -1559,7 +1652,7 @@ function render(state, canvas, elapsed, dt) {
       const range = 0.5*0.9*hp;
       const period = 0.008 * (2 - hp);
       const t = 0.5 + 0.5*Math.cos(elapsed*period);
-      ctx.globalAlpha = lerp(min, min+range, t);
+      ctx.globalAlpha = ALPHA * lerp(min, min+range, t);
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(angle - Math.PI*(3/4));
@@ -1567,12 +1660,16 @@ function render(state, canvas, elapsed, dt) {
       ctx.rotate(rot);
       draw_tile(TILE_WOLF, 0.0, 0.0, TILE_SIZE);
       ctx.restore();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = ALPHA;
     }
 
-    do_grabgrid(world.grab_grid, "render_fg", { ctx });
+    do_grabgrid(world.grab_grid, "render_fg", { ctx, day_t: day_t(world) });
 
-    const fg = do_map("render_fg", { width: canvas.width, seed: world.map_seed });
+    const fg = do_map("render_fg", {
+      width: canvas.width,
+      seed: world.map_seed,
+      day_t: day_t(world),
+    });
     ctx.drawImage(fg, 0, 0, fg.width, fg.height, 0, 0, 1, 1);
 
     if (WALKGRID_DEBUG_DRAW) {
@@ -1592,13 +1689,17 @@ function render(state, canvas, elapsed, dt) {
     ctx.lineWidth = w*0.002;
     let c = 0;
 
+    const HUD_TEXT_WIDTH = 12;
+    const HUD_TEXT_X = w*0.755;
+
     const daystr_100 = (world.hud.day_100.toFixed(0) + '%').padStart(4);
-    const daystr = ('day: ' + daystr_100).padStart(10);
-    ctx.strokeText(daystr, w*0.8, c +  h*0.04);
-    ctx.fillText  (daystr, w*0.8, c += h*0.04);
-    const sprstr = (world.hud.spear_count + ' spears').padStart(10);
-    ctx.strokeText(sprstr, w*0.8, c +  h*0.04);
-    ctx.fillText  (sprstr, w*0.8, c += h*0.04);
+    const daystr_phase = world.hud.daynight == DAYNIGHT_DAY ? 'day' : 'night';
+    const daystr = (daystr_phase + ': ' + daystr_100).padStart(HUD_TEXT_WIDTH);
+    ctx.strokeText(daystr, HUD_TEXT_X, c +  h*0.04);
+    ctx.fillText  (daystr, HUD_TEXT_X, c += h*0.04);
+    const sprstr = (world.hud.spear_count + ' spears').padStart(HUD_TEXT_WIDTH);
+    ctx.strokeText(sprstr, HUD_TEXT_X, c +  h*0.04);
+    ctx.fillText  (sprstr, HUD_TEXT_X, c += h*0.04);
   }
 
   /* lerp camera
@@ -1642,10 +1743,13 @@ function w_grid_fill_no_edge(w_grid, x, y, num) {
   }
 }
 
-function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
+function do_grabgrid(g_grid, mode, { ctx, day_t, w_grid }) {
   const walkgrid = mode == "walkgrid";
   const render_bg = mode == "render_bg";
   const render_fg = mode == "render_fg";
+
+  const ALPHA = lerp(0.25, 1, day_t);
+  const ALPHA_TAKEN = lerp(0.06, 0.3, day_t);
 
   const draw_tile = (tile, dx, dy) => {
     ctx.drawImage(
@@ -1667,6 +1771,7 @@ function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
   const TILE_BARREL = { w: 1, h: 1, x: 10, y: 7 };
   const pad = TILE_SIZE/3/2; // 0;
 
+  if (render_fg || render_bg) ctx.globalAlpha = ALPHA;
   for (let x = 0; x < TILE_COUNT; x++)
     for (let y = 0; y < TILE_COUNT; y++) {
       const dx = x * TILE_SIZE;
@@ -1675,9 +1780,9 @@ function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
 
       if (gval >= GRABGRID_SCRAP_TAKEN) {
         if (render_bg) {
-          if (gval == GRABGRID_SCRAP_TAKEN) ctx.globalAlpha = 0.3;
+          ctx.globalAlpha = (gval == GRABGRID_SCRAP_TAKEN) ? ALPHA_TAKEN : ALPHA;
           draw_tile(TILE_SCRAP, dx, dy, 1);
-          ctx.globalAlpha = 1.0;
+          ctx.globalAlpha = ALPHA;
         }
       }
 
@@ -1702,13 +1807,14 @@ function do_grabgrid(g_grid, mode, { ctx, w_grid }) {
         if (walkgrid) w_grid_fill(w_grid, x, y, 0, fill);
       }
     }
+  if (render_fg || render_bg) ctx.globalAlpha = 1;
 }
 
-let cached_bg,
-    cached_hash_bg,
-    cached_fg,
-    cached_seed_fg;
-function do_map(mode, { seed, width }) {
+const bg_cache = {
+  [DAYNIGHT_DAY  ]: { canvas: { width: 0 }, hash: "" },
+  [DAYNIGHT_NIGHT]: { canvas: { width: 0 }, hash: "" },
+};
+function do_map(mode, { seed, width, daynight, day_t }) {
   const render = mode == "render";
   const render_fg = mode == "render_fg"; /* foreground, floating layer (tree) */
   const walkgrid = mode == "walkgrid";
@@ -1720,12 +1826,13 @@ function do_map(mode, { seed, width }) {
 
   let fg, bg, ctx;
   if (render) {
-    const hash = seed;
-    if (cached_bg && cached_bg.width == width && hash == cached_hash_bg)
-      return cached_bg;
+    const cache = bg_cache[daynight];
+    const hash = seed + daynight;
+    if (cache.canvas.width == width && cache.hash == hash)
+      return cache.canvas;
 
-    cached_hash_bg = hash;
-    bg = cached_bg = document.createElement('canvas');
+    cache.hash   = hash;
+    cache.canvas = bg = document.createElement('canvas');
     bg.width = width;
     bg.height = width;
 
@@ -1734,11 +1841,7 @@ function do_map(mode, { seed, width }) {
   }
 
   if (render_fg) {
-    if (cached_fg && cached_fg.width == width && seed == cached_seed_fg)
-      return cached_fg;
-
-    cached_seed_fg = seed;
-    fg = cached_fg = document.createElement('canvas');
+    fg = document.createElement('canvas');
     fg.width = width;
     fg.height = width;
 
@@ -1746,8 +1849,21 @@ function do_map(mode, { seed, width }) {
     ctx.scale(fg.width, fg.width);
   }
 
-  const hsl_s = 50;
-  const hsl_l = 58;
+  /* fg lerps */
+  const TREE_ALPHA       = lerp(0.21, 0.93, day_t);
+  const RUINS_WALL_ALPHA = lerp(0.21, 0.93, day_t);
+
+  /* bg uses alpha hack */
+  const night = daynight == DAYNIGHT_NIGHT;
+  const RUINS_WALKABLE_ALPHA = night ? 0.04 : 0.14;
+  const RUINS_STENCIL_ALPHA = t => (0.4 + 0.35*t) * (night ? 0.11 : 1);
+  const PIER_STENCIL_ALPHA = 0.5 * (night ? 0.35 : 1);
+  const PIER_STENCIL_ALPHA_STUD = 0.3 * (night ? 0.35 : 1);
+  const FLOWER_ALPHA = night ? 0.1 : 0.43;
+  const hsl_s   = night ? 11 : 50;
+  const hsl_l   = night ? 13 : 58;
+  const ruins_s = night ?  0 : 80;
+  const ruins_l = night ?  0 : 40;
   if (render) {
     ctx.fillStyle = `hsl(199, ${hsl_s}%, ${hsl_l}%)`;
     ctx.fillRect(0, 0, 1, 1);
@@ -1828,7 +1944,7 @@ function do_map(mode, { seed, width }) {
 
         ctx.globalAlpha = 0.1;
         if (inoise <= WALK_THRESHOLD)
-          ctx.globalAlpha += 0.14 * (1 - (inoise / WALK_THRESHOLD));
+          ctx.globalAlpha += RUINS_WALKABLE_ALPHA * (1 - (inoise / WALK_THRESHOLD));
         if (inoise  > WALK_THRESHOLD)
           ctx.globalAlpha -= 0.1 * (inoise / (1 - WALK_THRESHOLD));
 
@@ -1892,11 +2008,11 @@ function do_map(mode, { seed, width }) {
         let t = inv_lerp(RUINS_THRESHOLD, RUINS_THRESHOLD*0.85, rnoise);
         if (t > 1) t = 1;
         ctx.globalAlpha = 0.2 + 0.2*t;
-        ctx.fillStyle = 'hsl(240, 80%, 40%)';
+        ctx.fillStyle = `hsl(240, ${ruins_s}%, ${ruins_l}%)`;
         const pad = TILE_SIZE/28;
         ctx.fillRect(dx+pad, dy+pad, TILE_SIZE-pad*2, TILE_SIZE-pad*2);
 
-        ctx.globalAlpha = 0.4 + 0.35*t;
+        ctx.globalAlpha = RUINS_STENCIL_ALPHA(t);
         const fold = Math.sqrt(fx*fx + fy*fy);
         let tile = TILE_TILE;
         if (fold < 2) tile = TILE_FANCY2;
@@ -1931,11 +2047,10 @@ function do_map(mode, { seed, width }) {
           ctx.fillStyle = `hsl(25, ${hsl_s+35}%, ${hsl_l-35}%)`;
           const pad = TILE_SIZE/45;
           ctx.fillRect(dx+pad, dy+pad, TILE_SIZE-pad*2, TILE_SIZE-pad*2);
-
-          ctx.globalAlpha = 0.5;
+          ctx.globalAlpha = PIER_STENCIL_ALPHA;
           draw_tile(tile, dx, dy, flip);
           if ((cx^cy)%2) {
-            ctx.globalAlpha = 0.3;
+            ctx.globalAlpha = PIER_STENCIL_ALPHA_STUD;
             draw_tile(TILE_STUDS, dx, dy, flip);
           }
           ctx.globalAlpha = 1;
@@ -1944,7 +2059,6 @@ function do_map(mode, { seed, width }) {
     }
 
   /* walls in ruins */
-  if (render) ctx.globalAlpha = 0.93;
   for (let x = 0; x < 1.0/TILE_SIZE; x++)
     for (let y = 0; y < 1.0/TILE_SIZE; y++) {
       const dx = x*TILE_SIZE;
@@ -1978,11 +2092,12 @@ function do_map(mode, { seed, width }) {
                      w_grid[(hy+2)*HARD_COUNT + (hx+2)] = 0;
       }
       if (render_fg) {
+        ctx.globalAlpha = RUINS_WALL_ALPHA;
         if (cy == 0) draw_tile(TILE_WALL, dx    , dy-six);
         if (cx == 0) draw_tile(TILE_WALL, dx+six, dy, 1);
+        ctx.globalAlpha = 1;
       }
     }
-  if (render) ctx.globalAlpha = 1;
 
   for (let x = 0; x < 1.0/TILE_SIZE; x++)
     for (let y = 0; y < 1.0/TILE_SIZE; y++) {
@@ -1992,7 +2107,7 @@ function do_map(mode, { seed, width }) {
       if (ruins_noise(dx, dy) > RUINS_THRESHOLD*1.4 &&
           ruins_noise(dx, dy) < RUINS_THRESHOLD*1.5) {
         if (render) {
-          ctx.globalAlpha = 0.43;
+          ctx.globalAlpha = FLOWER_ALPHA;
           draw_tile(TILE_FLOWER, dx, dy, 1);
           ctx.globalAlpha = 1;
         }
@@ -2034,7 +2149,7 @@ function do_map(mode, { seed, width }) {
           w_grid_fill(w_grid, x, y, 0);
 
         if (render_fg) {
-          ctx.globalAlpha = 0.93;
+          ctx.globalAlpha = TREE_ALPHA;
           const dsize = TILE_SIZE*1.4;
           const tile = TILE_TREE;
           ctx.drawImage(
